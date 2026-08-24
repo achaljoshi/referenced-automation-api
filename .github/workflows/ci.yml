@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RERUN_FILE: target/cucumber-reports/rerun.txt
+  # NOTE: referenced-automation-utils is not yet published to this org's
+  # Nexus, so every job below installs it locally first. Delete that step
+  # once it is published - the version pinned in pom.xml will then resolve
+  # from Nexus like any other dependency.
+  UTILS_REPO_URL: https://github.com/achaljoshi/referenced-automation-utils.git
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Install referenced-automation-utils (not yet published to Nexus)
+        run: |
+          git clone --depth 1 "$UTILS_REPO_URL" /tmp/referenced-automation-utils
+          (cd /tmp/referenced-automation-utils && ./mvnw -B -ntp -DskipTests install)
+      - name: Compile
+        run: ./mvnw -B -ntp clean compile test-compile
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Install referenced-automation-utils (not yet published to Nexus)
+        run: |
+          git clone --depth 1 "$UTILS_REPO_URL" /tmp/referenced-automation-utils
+          (cd /tmp/referenced-automation-utils && ./mvnw -B -ntp -DskipTests install)
+
+      - name: Run Cucumber suite
+        run: |
+          rm -f "$RERUN_FILE"
+          ./mvnw -B -ntp test -Denv=qa || true
+
+      - name: Retry failed scenarios
+        run: |
+          if [ -s "$RERUN_FILE" ]; then
+            echo "== Retrying failed scenarios =="
+            cat "$RERUN_FILE"
+            ./mvnw -B -ntp test -Denv=qa -Dcucumber.features="@$RERUN_FILE" || true
+          fi
+
+      - name: Gate on final result
+        run: |
+          if [ -s "$RERUN_FILE" ]; then
+            echo "Scenarios still failing after retry:"
+            cat "$RERUN_FILE"
+            exit 1
+          fi
+          echo "All scenarios passed (first attempt or after retry)."
+
+      - name: Publish JUnit test report
+        if: always()
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: "target/cucumber-reports/cucumber.xml"
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            target/cucumber-reports/
+            target/extent-report/
+            target/allure-results/
+            logs/
+          retention-days: 30
+
+  publish-allure-report:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-reports
+          path: target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Generate Allure HTML report
+        run: |
+          npm install -g allure-commandline --silent
+          allure generate target/allure-results --clean -o allure-report
+      - name: Publish to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: allure-report
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Generate settings.xml
+        run: |
+          cat > ci-settings.xml <<EOF
+          <settings>
+            <servers>
+              <server><id>nexus-releases</id><username>${{ secrets.NEXUS_USER }}</username><password>${{ secrets.NEXUS_PASS }}</password></server>
+              <server><id>nexus-snapshots</id><username>${{ secrets.NEXUS_USER }}</username><password>${{ secrets.NEXUS_PASS }}</password></server>
+            </servers>
+          </settings>
+          EOF
+      - name: Deploy to Nexus
+        env:
+          NEXUS_RELEASE_URL: ${{ secrets.NEXUS_RELEASE_URL }}
+          NEXUS_SNAPSHOT_URL: ${{ secrets.NEXUS_SNAPSHOT_URL }}
+        run: ./mvnw -B -ntp -s ci-settings.xml -DskipTests deploy

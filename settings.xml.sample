@@ -1,0 +1,25 @@
+<!--
+  Sample Maven settings.xml for LOCAL publishing to Nexus.
+
+  Copy this file to ~/.m2/settings.xml (or reference it with `mvn -s`) and
+  fill in real credentials. NEVER commit a filled-in copy - settings.xml is
+  already in .gitignore for that reason. CI pipelines generate their own
+  equivalent on the fly from protected secret variables (see
+  .gitlab-ci.yml / .github/workflows/ci.yml) instead of using this file.
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+    <servers>
+        <server>
+            <id>nexus-releases</id>
+            <username>REPLACE_ME</username>
+            <password>REPLACE_ME</password>
+        </server>
+        <server>
+            <id>nexus-snapshots</id>
+            <username>REPLACE_ME</username>
+            <password>REPLACE_ME</password>
+        </server>
+    </servers>
+</settings>

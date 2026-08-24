@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<extentreports>
+    <configuration>
+        <theme>standard</theme>
+        <documentTitle>Referenced Automation API - Execution Report</documentTitle>
+        <reportName>Referenced Automation API Framework</reportName>
+        <timelineEnabled>true</timelineEnabled>
+        <encoding>UTF-8</encoding>
+        <protocol>https</protocol>
+    </configuration>
+</extentreports>

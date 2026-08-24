@@ -1,0 +1,41 @@
+# Compiled output
+target/
+*.class
+
+# Logs
+logs/
+*.log
+
+# Reports (generated at runtime - never commit report output)
+/test-output/
+/extent-report/
+/allure-results/
+/allure-report/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# IntelliJ - keep shared project config, ignore machine-specific state
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+.idea/httpRequests/
+.idea/dataSources/
+.idea/dataSources.local.xml
+*.iml
+out/
+
+# Eclipse / other IDEs
+.project
+.classpath
+.settings/
+.vscode/
+
+# Maven wrapper jar is downloaded on demand, do not track the binary
+.mvn/wrapper/maven-wrapper.jar
+
+# Secrets - never commit real credentials
+settings.xml
