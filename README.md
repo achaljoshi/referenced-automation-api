@@ -11,6 +11,8 @@ Built on `@playwright/test`'s `APIRequestContext` - no separate HTTP client libr
 npm test                 # runs this package's own test suite against an in-process mock server
 ```
 
+`setup.sh`/`setup.bat` work from a completely fresh clone of the whole repo family, in any order: this repo depends on `referenced-automation-utils`, so if `../shared-packages/automation-referenced-automation-utils-*.tgz` doesn't exist yet, setup builds it automatically from `../referenced-automation-utils` (cloning nothing on its own - that sibling repo must already be checked out next to this one). See [Distributing this package](#distributing-this-package) for the layout this assumes.
+
 ```ts
 import { ApiClient, BearerAuth } from '@automation/referenced-automation-api';
 import { request } from '@playwright/test';
