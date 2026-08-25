@@ -1,0 +1,51 @@
+{
+  "name": "@automation/referenced-automation-api",
+  "version": "1.0.0",
+  "description": "Reusable Playwright-based API testing framework: every HTTP method, header/body CRUD (JSON/XML/form/multipart), query/path params, auth strategies, pagination, and a response wrapper that traverses like response.get('data[0].name').",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rimraf dist *.tgz",
+    "lint": "eslint . --ext .ts",
+    "test": "playwright test",
+    "pretest": "npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@automation/referenced-automation-utils": "file:../shared-packages/automation-referenced-automation-utils-1.0.0.tgz",
+    "fast-xml-parser": "^5.11.0"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^22.10.5",
+    "@typescript-eslint/eslint-plugin": "^8.19.1",
+    "@typescript-eslint/parser": "^8.19.1",
+    "eslint": "^8.57.1",
+    "express": "^4.21.2",
+    "multer": "^2.0.1",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3"
+  }
+}

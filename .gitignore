@@ -1,16 +1,22 @@
-# Compiled output
-target/
-*.class
+# Dependencies
+node_modules/
 
-# Logs
+# Build output
+dist/
+*.tgz
+
+# Test output
+test-results/
+playwright-report/
+blob-report/
+.last-run.json
 logs/
 *.log
 
-# Reports (generated at runtime - never commit report output)
-/test-output/
-/extent-report/
-/allure-results/
-/allure-report/
+# Local env overrides - never commit real secrets. .env.<env> template files
+# (.env.qa, .env.stage, .env.dev) ARE committed; only the local override is not.
+.env
+.env.local
 
 # OS / editor
 .DS_Store
@@ -28,14 +34,13 @@ Thumbs.db
 *.iml
 out/
 
+# VS Code - keep shared settings/extensions, ignore machine-specific state
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
 # Eclipse / other IDEs
 .project
 .classpath
 .settings/
-.vscode/
-
-# Maven wrapper jar is downloaded on demand, do not track the binary
-.mvn/wrapper/maven-wrapper.jar
-
-# Secrets - never commit real credentials
-settings.xml
