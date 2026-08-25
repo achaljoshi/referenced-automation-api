@@ -20,6 +20,9 @@ if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
 call npm ci
 if errorlevel 1 exit /b 1
 
+call npm run clean
+if errorlevel 1 exit /b 1
+
 call npm run build
 if errorlevel 1 exit /b 1
 

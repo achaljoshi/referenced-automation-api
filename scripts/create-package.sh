@@ -17,6 +17,7 @@ OUT_DIR="${1:-../shared-packages}"
 mkdir -p "$OUT_DIR"
 
 npm ci
+npm run clean
 npm run build
 
 # `npm pack` runs the "prepack" script (build) again and writes
