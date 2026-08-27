@@ -11,6 +11,7 @@ export default defineConfig({
   reporter: [
     ['list'],
     ['html', { open: 'never' }],
+    ['junit', { outputFile: 'test-results/junit.xml' }],
     // Raw results only - generating the viewable HTML report is a separate
     // step (`npm run allure:report`) since it needs a JRE on PATH, unlike
     // collecting results here which is pure JS/TS.
