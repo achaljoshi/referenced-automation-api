@@ -19,6 +19,7 @@ logs/
 # (.env.qa, .env.stage, .env.dev) ARE committed; only the local override is not.
 .env
 .env.local
+.env.*.local
 
 # OS / editor
 .DS_Store
