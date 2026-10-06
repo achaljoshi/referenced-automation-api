@@ -20,7 +20,15 @@ export interface MockRouteOptions {
  * A static value, or a function computing one per-request from its params/
  * query/headers/body - e.g. `(req) => ({ id: Number(req.params.id) })`.
  */
-export type MockBody = unknown | ((req: MockRequestInfo) => unknown | Promise<unknown>);
+export type MockBody = unknown | MockBodyFn;
+
+/**
+ * The function form of a body. Exported separately because `MockBody` itself
+ * collapses to `unknown` (a union with `unknown` is `unknown`), which gives an
+ * arrow function nothing to infer `req` from - so `MockServer`'s verb methods
+ * overload on this type to keep `(req) => ...` typed under `noImplicitAny`.
+ */
+export type MockBodyFn = (req: MockRequestInfo) => unknown | Promise<unknown>;
 
 export interface MockResult {
   status?: number;

@@ -124,6 +124,10 @@ await page.goto('https://example.com/checkout'); // served entirely from the rec
 
 Matching during playback defaults to method + exact URL (including query string); pass `{ matchBy: 'url' }` to ignore method. A request inside the pattern with no matching recorded entry falls through to the real network by default (`route.fallback()`) - pass `onUnmatched` to handle that case yourself instead (e.g. fail the test loudly rather than silently hitting a real backend). Response bodies are stored base64-encoded, so binary responses (images, gzip) round-trip correctly.
 
+## Correlation and logging
+
+The built-in `test` has an auto fixture that gives every test a correlation ID. `ApiClient` sends it as the `X-Correlation-Id` header on every request and logs each call (e.g. `GET /users/1 -> 200 (41ms) cid=ad9e928b` - query strings stripped, secrets redacted), so one failing test can be traced from the CI log into the API gateway's logs by grepping a single value. Use `CORRELATION_HEADER` to read the header name.
+
 ## Environments
 
 Same pattern as every other repo in this family: `.env.<name>` files + `ENV=<name>`. See `.env.qa`/`.env.stage`/`.env.dev` here, and `referenced-automation-utils`' README for the full explanation. `playwright.config.ts` reads `API_BASE_URL` from the active env file and uses it as `use.baseURL`.

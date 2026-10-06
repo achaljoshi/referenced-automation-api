@@ -20,10 +20,12 @@ import {
   SmtpClient,
   SftpClient,
   CommonsError,
+  testing,
 } from '@automation/referenced-automation-utils';
 import { ApiClient, MockServer } from '../src';
-import { startSmtpTestServer, stopSmtpTestServer, type SmtpTestServerHandle } from './support/smtpTestServer';
-import { startSftpTestServer, stopSftpTestServer, type SftpTestServerHandle } from './support/sftpTestServer';
+const { startSmtpTestServer, stopSmtpTestServer, startSftpTestServer, stopSftpTestServer } = testing;
+type SmtpTestServerHandle = testing.SmtpTestServerHandle;
+type SftpTestServerHandle = testing.SftpTestServerHandle;
 
 /**
  * A demo/reference suite for every reusable method

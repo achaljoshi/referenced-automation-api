@@ -1,23 +1,9 @@
-import { defineConfig } from '@playwright/test';
-import { loadEnv } from '@automation/referenced-automation-utils';
+import { createPlaywrightConfig } from '@automation/referenced-automation-utils';
 
-const env = loadEnv();
-
-export default defineConfig({
-  testDir: './tests',
-  fullyParallel: true,
-  forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
-  reporter: [
-    ['list'],
-    ['html', { open: 'never' }],
-    ['junit', { outputFile: 'test-results/junit.xml' }],
-    // Raw results only - generating the viewable HTML report is a separate
-    // step (`npm run allure:report`) since it needs a JRE on PATH, unlike
-    // collecting results here which is pure JS/TS.
-    ['allure-playwright', { resultsDir: 'allure-results' }],
-  ],
-  use: {
-    baseURL: env.getOptional('API_BASE_URL'),
-  },
+// Defined once in utils so every repo in the family runs Playwright the same
+// way - see createPlaywrightConfig's doc comment for every env var it reads.
+export default createPlaywrightConfig({
+  dir: __dirname,
+  name: '@automation/referenced-automation-api',
+  baseUrlKey: 'API_BASE_URL',
 });

@@ -1,7 +1,9 @@
 import type { APIRequestContext } from '@playwright/test';
+import { getCorrelationId, getLogger, newCorrelationId } from '@automation/referenced-automation-utils';
 import type { AuthProvider, AuthTarget } from '../auth/authProvider';
 import { ApiResponse } from './apiResponse';
 import type { HttpMethod, QueryValue, RequestOptions } from './types';
+import { safeUrl } from './logging';
 import { toPlaywrightMultipart } from './multipart';
 import { toXml } from './xml';
 
@@ -11,6 +13,11 @@ import { toXml } from './xml';
  * query/path params and body (JSON/XML/form/multipart), returning an
  * already-parsed, path-traversable ApiResponse.
  */
+/** Sent on every request so one flow can be traced across this client, the gateway, and the target system's logs. */
+export const CORRELATION_HEADER = 'X-Correlation-Id';
+
+const log = getLogger('api');
+
 export class ApiClient {
   private defaultHeaders: Record<string, string> = {};
   private authProvider?: AuthProvider;
@@ -81,6 +88,12 @@ export class ApiClient {
       headers: { ...this.defaultHeaders, ...options.headers },
       queryParams: { ...(options.queryParams ?? {}) },
     };
+    // Use the test's active correlation ID when there is one (so every call a
+    // test makes shares it); otherwise mint one for this request alone. A
+    // header the caller set explicitly always wins.
+    const hasCorrelationHeader = Object.keys(target.headers).some((h) => h.toLowerCase() === CORRELATION_HEADER.toLowerCase());
+    if (!hasCorrelationHeader) target.headers[CORRELATION_HEADER] = getCorrelationId() ?? newCorrelationId();
+    const correlationId = Object.entries(target.headers).find(([h]) => h.toLowerCase() === CORRELATION_HEADER.toLowerCase())?.[1];
     if (this.authProvider) {
       await this.authProvider.apply(target);
     }
@@ -106,8 +119,18 @@ export class ApiClient {
       fetchOptions.data = options.rawBody;
     }
 
-    const raw = await this.context.fetch(url, fetchOptions);
-    return ApiResponse.from(raw);
+    const startedAt = Date.now();
+    const query = buildSearchParams(target.queryParams).toString();
+    const logged = `${method} ${safeUrl(query ? `${url}${url.includes('?') ? '&' : '?'}${query}` : url)}`;
+    try {
+      const raw = await this.context.fetch(url, fetchOptions);
+      const response = await ApiResponse.from(raw);
+      log.info(`${logged} -> ${response.status()} (${Date.now() - startedAt}ms) cid=${String(correlationId).slice(0, 8)}`);
+      return response;
+    } catch (error) {
+      log.error(`${logged} FAILED (${Date.now() - startedAt}ms) cid=${String(correlationId).slice(0, 8)}: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
   get(path: string, options?: RequestOptions): Promise<ApiResponse> {

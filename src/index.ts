@@ -6,3 +6,5 @@ export * from './auth/authProvider';
 export * from './pagination/paginate';
 export * from './mock';
 export { test, expect } from './fixtures/apiFixtures';
+export { CORRELATION_HEADER } from './client/apiClient';
+export { safeUrl } from './client/logging';

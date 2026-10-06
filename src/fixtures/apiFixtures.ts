@@ -1,9 +1,11 @@
 import { test as base, request as playwrightRequest } from '@playwright/test';
-import { loadEnv } from '@automation/referenced-automation-utils';
+import { loadEnv, useTestCorrelation } from '@automation/referenced-automation-utils';
 import { ApiClient } from '../client/apiClient';
 import { MockServer } from '../mock/mockServer';
 
 interface ApiFixtures {
+  /** This test's correlation ID - automatic (every test gets one), sent as X-Correlation-Id on every ApiClient call and shown on every log line. Request it only if you need the value itself. */
+  correlationId: string;
   apiClient: ApiClient;
   /** A fresh MockServer, started before the test and stopped after - only paid for by tests that ask for it. */
   mockServer: MockServer;
@@ -16,6 +18,8 @@ interface ApiFixtures {
  * per-test setup/teardown of an APIRequestContext required.
  */
 export const test = base.extend<ApiFixtures>({
+  correlationId: [async ({}, use, testInfo) => useTestCorrelation(testInfo, use), { auto: true }],
+
   apiClient: async ({}, use) => {
     const env = loadEnv();
     const baseUrl = env.get('API_BASE_URL', '');

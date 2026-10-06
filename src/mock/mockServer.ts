@@ -1,7 +1,7 @@
 import express, { type Express, type Request, type Response } from 'express';
 import type { Server } from 'node:http';
 import { logger } from '@automation/referenced-automation-utils';
-import type { MockBody, MockRequestInfo, MockRouteDefinition, MockRouteOptions } from './types';
+import type { MockBody, MockBodyFn, MockRequestInfo, MockRouteDefinition, MockRouteOptions } from './types';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -76,22 +76,32 @@ export class MockServer {
     return this;
   }
 
+  get(path: string, body: MockBodyFn, options?: MockRouteOptions): this;
+  get(path: string, body?: MockBody, options?: MockRouteOptions): this;
   get(path: string, body: MockBody = {}, options?: MockRouteOptions): this {
     return this.register('get', path, body, options);
   }
 
+  post(path: string, body: MockBodyFn, options?: MockRouteOptions): this;
+  post(path: string, body?: MockBody, options?: MockRouteOptions): this;
   post(path: string, body: MockBody = {}, options?: MockRouteOptions): this {
     return this.register('post', path, body, options);
   }
 
+  put(path: string, body: MockBodyFn, options?: MockRouteOptions): this;
+  put(path: string, body?: MockBody, options?: MockRouteOptions): this;
   put(path: string, body: MockBody = {}, options?: MockRouteOptions): this {
     return this.register('put', path, body, options);
   }
 
+  patch(path: string, body: MockBodyFn, options?: MockRouteOptions): this;
+  patch(path: string, body?: MockBody, options?: MockRouteOptions): this;
   patch(path: string, body: MockBody = {}, options?: MockRouteOptions): this {
     return this.register('patch', path, body, options);
   }
 
+  delete(path: string, body: MockBodyFn, options?: MockRouteOptions): this;
+  delete(path: string, body?: MockBody, options?: MockRouteOptions): this;
   delete(path: string, body: MockBody = {}, options?: MockRouteOptions): this {
     return this.register('delete', path, body, options);
   }

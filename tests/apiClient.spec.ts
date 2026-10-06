@@ -244,3 +244,47 @@ test.describe('pagination', () => {
     expect(items).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]);
   });
 });
+
+import { CORRELATION_HEADER, safeUrl } from '../src';
+import { getCorrelationId, setCorrelationId } from '@automation/referenced-automation-utils';
+
+test.describe('correlation id and request logging', () => {
+  test.afterEach(() => setCorrelationId(undefined));
+
+  test('every request carries an X-Correlation-Id header, minted per request when no test id is active', async () => {
+    const first = await client.get('/headers-echo');
+    const second = await client.get('/headers-echo');
+    const a = first.get<string>(`headers.${CORRELATION_HEADER.toLowerCase()}`);
+    const b = second.get<string>(`headers.${CORRELATION_HEADER.toLowerCase()}`);
+    expect(a).toMatch(/^[0-9a-f-]{36}$/);
+    expect(b).toMatch(/^[0-9a-f-]{36}$/);
+    expect(a).not.toBe(b);
+  });
+
+  test('uses the active correlation id for every call, so one flow shares one id', async () => {
+    setCorrelationId('flow-1234');
+    const a = await client.get('/headers-echo');
+    const b = await client.get('/headers-echo');
+    expect(a.get(`headers.${CORRELATION_HEADER.toLowerCase()}`)).toBe('flow-1234');
+    expect(b.get(`headers.${CORRELATION_HEADER.toLowerCase()}`)).toBe('flow-1234');
+    expect(getCorrelationId()).toBe('flow-1234');
+  });
+
+  test('a correlation header set by the caller is never overwritten', async () => {
+    const response = await client.get('/headers-echo', { headers: { [CORRELATION_HEADER]: 'caller-supplied' } });
+    expect(response.get(`headers.${CORRELATION_HEADER.toLowerCase()}`)).toBe('caller-supplied');
+  });
+});
+
+test.describe('safeUrl - never logs a credential from the query string', () => {
+  test('masks credential-looking params and keeps the rest', () => {
+    expect(safeUrl('https://api.example.test/users?page=2&apiKey=live-key&access_token=abc&q=ada')).toBe(
+      'https://api.example.test/users?page=2&apiKey=[REDACTED]&access_token=[REDACTED]&q=ada',
+    );
+    expect(safeUrl('/search?signature=zzz&limit=5')).toBe('/search?signature=[REDACTED]&limit=5');
+  });
+
+  test('leaves a URL with no query string alone', () => {
+    expect(safeUrl('https://api.example.test/users/42')).toBe('https://api.example.test/users/42');
+  });
+});

@@ -2,13 +2,17 @@ import type { Page, Request as PlaywrightRequest } from '@playwright/test';
 import { logger } from '@automation/referenced-automation-utils';
 import type { HttpMethod } from '../client/types';
 
+export type RouteMockBodyFn = (request: PlaywrightRequest) => unknown | Promise<unknown>;
+
 export interface RouteMockDefinition {
   /** Glob or regex, same syntax/semantics as page.route()'s own first argument. */
   url: string | RegExp;
   /** Restrict the mock to one HTTP method - a non-matching method on the same URL falls through untouched (route.fallback()). */
   method?: HttpMethod;
   /** Static body, or a function computing it from the intercepted Playwright Request (query/postData/headers). */
-  body?: unknown | ((request: PlaywrightRequest) => unknown | Promise<unknown>);
+  // Not `unknown | fn`: a union with `unknown` collapses to `unknown`, and then
+  // `(request) => ...` has nothing to infer `request` from (implicit any under strict).
+  body?: RouteMockBodyFn | object | string | number | boolean | null;
   status?: number;
   headers?: Record<string, string>;
   contentType?: string;
