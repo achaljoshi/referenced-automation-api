@@ -139,6 +139,23 @@ test:
       junit: test-results/junit.xml
     expire_in: 30 days
 
+# ---- Security gates: dependency audit + secret scan ----
+#
+# automation-audit-gate fails on high/critical advisories unless audit-allowlist.json accepts them - each exception
+# has an owner, a reason and an EXPIRY DATE, so an accepted risk is re-decided on purpose. automation-scan-secrets
+# fails if a secret is about to be committed (and never prints it). Both ship in @automation/referenced-automation-utils.
+# allow_failure is true until this job has run green on your GitLab (the audit needs NPM_REGISTRY_URL to be reachable
+# and to support `npm audit`) - then set it to false.
+security:
+  stage: test
+  needs: ["build"]
+  allow_failure: true
+  script:
+    - *package_utils_dependency
+    - npm ci
+    - npx automation-scan-secrets
+    - npx automation-audit-gate
+
 pages:
   stage: report
   needs: ["test"]

@@ -27,7 +27,8 @@
     "prepack": "npm run build",
     "allure:generate": "allure generate allure-results --clean -o allure-report",
     "allure:open": "allure open allure-report",
-    "allure:report": "npm run allure:generate && npm run allure:open"
+    "allure:report": "npm run allure:generate && npm run allure:open",
+    "security": "automation-audit-gate && automation-scan-secrets"
   },
   "dependencies": {
     "@automation/referenced-automation-utils": "file:../shared-packages/automation-referenced-automation-utils-1.0.0.tgz",
