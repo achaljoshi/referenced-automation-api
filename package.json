@@ -36,13 +36,13 @@
     "fast-xml-parser": "^5.11.0"
   },
   "peerDependencies": {
-    "@playwright/test": ">=1.62.1 <2.0.0"
+    "@playwright/test": ">=1.64.0 <2.0.0"
   },
   "overrides": {
     "uuid": "^11.1.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "^1.64.0",
     "@types/express": "^5.0.0",
     "@types/multer": "^2.2.0",
     "@types/node": "^22.10.5",
