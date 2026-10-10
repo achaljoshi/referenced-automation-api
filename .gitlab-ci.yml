@@ -61,18 +61,13 @@
 # the default `page` fixture (for mockApiRoute/record-replay), they don't
 # test cross-browser behaviour the way a real UI suite does.
 #
-# ---- Cross-repo dependency note ----
+# ---- Cross-repo dependencies: installed by version ----
 #
-# This repo depends on referenced-automation-utils, not yet published to a
-# registry - see that repo's README for why. The `build` stage below
-# clones it fresh and packages it with its own scripts/create-package.sh,
-# the exact same script a developer runs locally, so CI and local setup
-# never diverge.
-#
-# This assumes referenced-automation-utils lives in the same GitLab
-# group/namespace as this repo and is reachable with this job's own
-# CI_JOB_TOKEN. If your org's GitLab layout differs, override
-# UTILS_REPO_URL as a CI/CD variable instead of editing this file.
+# The @automation/* packages this repo uses are listed with their versions in package.json and installed by
+# `npm ci` from the registry in NPM_REGISTRY_URL, like any other package - nothing is cloned or packed here.
+# So every package this repo depends on must be PUBLISHED there at the version package.json asks for
+# (README: Publishing a package). To take a newer version, change it in package.json, run `npm install` and
+# commit package.json and package-lock.json.
 # ============================================================================
 
 image: csg-cst-docker-local.artifactory.alm.corp.hmrc.gov.uk:443/common/microsoft/playwright:v1.47.0-jammy
@@ -90,7 +85,6 @@ stages:
   - report
 
 variables:
-  UTILS_REPO_URL: "${CI_SERVER_URL}/${CI_PROJECT_NAMESPACE}/referenced-automation-utils.git"
   npm_config_cache: "${CI_PROJECT_DIR}/.npm-cache"
 
 cache:
@@ -102,16 +96,9 @@ before_script:
   - if [ -n "${NPM_REGISTRY_URL:-}" ]; then npm config set registry "$NPM_REGISTRY_URL"; fi
   - if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST:-}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST; fi
 
-.package_utils_dependency: &package_utils_dependency
-  - SHARED_PACKAGES_DIR="$(realpath "${CI_PROJECT_DIR}/../shared-packages")"
-  - mkdir -p "$SHARED_PACKAGES_DIR"
-  - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${UTILS_REPO_URL#https://}" /tmp/referenced-automation-utils
-  - bash /tmp/referenced-automation-utils/scripts/create-package.sh "$SHARED_PACKAGES_DIR"
-
 build:
   stage: build
   script:
-    - *package_utils_dependency
     - npm ci
     - npm run build
     - npm run lint
@@ -124,7 +111,6 @@ test:
   stage: test
   needs: ["build"]
   script:
-    - *package_utils_dependency
     - npm ci
     - npx playwright install chromium
     - npm test
@@ -151,7 +137,6 @@ security:
   needs: ["build"]
   allow_failure: true
   script:
-    - *package_utils_dependency
     - npm ci
     - npx automation-scan-secrets
     - npx automation-audit-gate

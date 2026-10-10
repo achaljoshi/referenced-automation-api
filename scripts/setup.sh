@@ -1,25 +1,39 @@
 #!/usr/bin/env bash
 # ============================================================================
-# One-shot local setup - works from a completely fresh clone of the whole
-# repo family, in any order: builds whichever sibling packages this repo
-# depends on (from a sibling checkout, cloning nothing on its own) before
-# `npm ci`, since npm ci fails otherwise if e.g. referenced-automation-utils
-# hasn't been packaged into ../shared-packages yet.
+# One-shot setup: installs this repo's dependencies. Pure API testing needs no browser binaries (no `page`/`browser` fixture is used here), so there is no `playwright install` step.
 #
-# Pure API testing needs no browser binaries (no `page`/`browser` fixture is
-# used here), so there is no `playwright install` step - see the `ui`/`sap`
-# repos for that.
+# Packages - the @automation/* ones too - are installed BY VERSION from the npm registry in NPM_REGISTRY_URL: the
+# versions are the ones in package.json. To pick up a newer version of a package, change its version there and run
+# `npm install` (README: Upgrading a package).
 #
-# Usage: ./scripts/setup.sh
+# Without these packages in a registry yet - or to try a change you have not published - use local mode:
+#   ./scripts/setup.sh --local
+# It builds the sibling repos this one depends on (referenced-automation-utils), keeps their .tgz files in
+# ../shared-packages and installs those instead. Nothing in package.json or package-lock.json changes. The sibling
+# repos must be checked out next to this one. (USE_LOCAL_PACKAGES=1 does the same.)
+#
+# Usage: ./scripts/setup.sh [--local]
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+LOCAL=0
+for arg in "$@"; do
+  if [ "$arg" = "--local" ]; then LOCAL=1; fi
+done
+if [ "${USE_LOCAL_PACKAGES:-}" = "1" ]; then LOCAL=1; fi
+
+# Every npm command below fetches packages from this registry.
+if [ -n "${NPM_REGISTRY_URL:-}" ]; then
+  npm config set registry "$NPM_REGISTRY_URL"
+else
+  echo "NOTE: NPM_REGISTRY_URL is not set - npm keeps using the registry it is already configured with ($(npm config get registry))."
+fi
+
 SHARED_PACKAGES_DIR="../shared-packages"
 
-# Builds <repo_name> into $SHARED_PACKAGES_DIR if its tarball isn't already
-# there. Assumes <repo_name> is checked out as a sibling of this repo (the
-# same layout scripts/create-package.sh's default output dir assumes).
+# Builds <repo_name> into $SHARED_PACKAGES_DIR if no tarball of it is there yet. Needs <repo_name> checked out as a
+# sibling of this repo; its own create-package.sh --local builds the packages IT depends on first.
 ensure_package() {
   local repo_name="$1"
   if compgen -G "$SHARED_PACKAGES_DIR/automation-${repo_name}-*.tgz" > /dev/null 2>&1; then
@@ -34,15 +48,31 @@ ensure_package() {
     exit 1
   fi
   echo "== Building ${repo_name} (dependency) =="
-  ( cd "$repo_dir" && ./scripts/create-package.sh "$SHARED_PACKAGES_DIR" )
+  ( cd "$repo_dir" && ./scripts/create-package.sh --local "$SHARED_PACKAGES_DIR" )
 }
 
-echo "== Ensuring dependency packages exist in ${SHARED_PACKAGES_DIR} =========="
-ensure_package referenced-automation-utils
+# The newest tarball of a package in $SHARED_PACKAGES_DIR (by version).
+latest_tarball() {
+  ls "$SHARED_PACKAGES_DIR"/automation-"$1"-*.tgz | sort -V | tail -1
+}
 
-echo ""
-echo "== Installing dependencies =========================================="
-npm ci
+if [ "$LOCAL" = "1" ]; then
+  echo ""
+  echo "== Local mode: making sure the @automation packages exist in ${SHARED_PACKAGES_DIR} =="
+  ensure_package referenced-automation-utils
+  echo ""
+  echo "== Installing dependencies (the @automation packages from ${SHARED_PACKAGES_DIR}; package.json and the lockfile stay as they are) =="
+  npm install --no-save --no-audit --no-fund "$(latest_tarball referenced-automation-utils)"
+else
+  echo ""
+  echo "== Installing dependencies from the registry =========================="
+  npm ci || {
+    echo "" >&2
+    echo "npm ci failed. If it stopped on an @automation/* package, that version is not in the registry yet:" >&2
+    echo "publish it (see the README: Publishing a package) or run ./scripts/setup.sh --local." >&2
+    exit 1
+  }
+fi
 
 echo ""
 echo "Setup complete. Try: npm test"

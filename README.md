@@ -11,7 +11,7 @@ Built on `@playwright/test`'s `APIRequestContext` - no separate HTTP client libr
 npm test                 # runs this package's own test suite against an in-process mock server
 ```
 
-`setup.sh`/`setup.bat` work from a completely fresh clone of the whole repo family, in any order: this repo depends on `referenced-automation-utils`, so if `../shared-packages/automation-referenced-automation-utils-*.tgz` doesn't exist yet, setup builds it automatically from `../referenced-automation-utils` (cloning nothing on its own - that sibling repo must already be checked out next to this one). See [Distributing this package](#distributing-this-package) for the layout this assumes.
+`setup.sh`/`setup.bat` run `npm ci`. They first run `npm config set registry "$NPM_REGISTRY_URL"` when that variable is set, so every package - the `@automation/*` ones too (`referenced-automation-utils`), each **by the version in `package.json`** - is fetched from your organisation's npm registry. If those packages are not published there yet, or you want to try a change you have not published, run `./scripts/setup.sh --local` (`scripts\setup.bat --local` on Windows): it builds the sibling repos this one depends on - they must be checked out next to this one - into `../shared-packages` and installs those instead, without touching `package.json` or the lockfile. See [Publishing a package](#publishing-a-package-to-the-registry-jfrog-artifactory) and [Using a package without a registry](#using-a-package-without-a-registry-local-generation).
 
 ```ts
 import { ApiClient, BearerAuth } from '@automation/referenced-automation-api';
@@ -241,13 +241,78 @@ npm run allure:report  # generates allure-report/ and opens it in a browser
 
 Or split the two steps (e.g. to generate in CI and open locally): `npm run allure:generate`, then `npm run allure:open`.
 
-## Distributing this package
+## Publishing a package to the registry (JFrog Artifactory)
 
-Same as `referenced-automation-utils` - build a local tarball until a private registry is available:
+The other repos install `@automation/referenced-automation-api` **by version** from your organisation's npm registry, so each new version has to be published there. In order:
+
+1. **Know the registry URL.** It is the npm registry URL of your Artifactory - the one in your `~/.npmrc` and in the `NPM_REGISTRY_URL` CI/CD variable. This repo never hard-codes it; ask your platform team if you do not have it.
+2. **Be allowed to publish.** Publishing needs an npm identity with deploy permission on that repository. How you authenticate npm against your Artifactory is your organisation's own procedure and is not covered here - the scripts in this repo never log in for you.
+3. **Choose the version and record it.** A version can be published only once:
+   ```bash
+   npm version patch --no-git-tag-version      # or minor / major - changes package.json only
+   ```
+   Add the change to `CHANGELOG.md` and commit both.
+4. **Point the scripts at the registry** (once per terminal):
+   ```bash
+   export NPM_REGISTRY_URL="<your registry URL>"        # Windows cmd: set NPM_REGISTRY_URL=<your registry URL>
+   ```
+5. **Publish** - a dry run first:
+   ```bash
+   ./scripts/publish-package.sh --dry-run     # builds the package and lists what would be uploaded
+   ./scripts/publish-package.sh               # uploads it            (Windows: scripts\publish-package.bat)
+   ```
+   The script runs `npm config set registry "$NPM_REGISTRY_URL"`, builds with `create-package.sh` (clean, build, `npm pack`) and runs `npm publish <the .tgz> --registry "$NPM_REGISTRY_URL"`.
+6. **Check it arrived:** `npm view @automation/referenced-automation-api versions --registry "$NPM_REGISTRY_URL"` lists the new version.
+
+**Without the script.** `./scripts/create-package.sh` leaves `../shared-packages/automation-referenced-automation-api-<version>.tgz`, the exact file `npm publish` uploads. Publish that file yourself (`npm publish ../shared-packages/<file>.tgz --registry "$NPM_REGISTRY_URL"`), or deploy the `.tgz` into the npm repository through the Artifactory web UI (the repository's **Deploy** action - Artifactory takes the package name and version from the tarball; check with your platform team how your repository is set up), or hand it to whoever manages the repository.
+
+**Order matters.** Publish what a package depends on first: `utils` -> `api` and `ui` -> `sap` -> the consuming repos.
+
+## Upgrading a package: change one version
+
+This repo lists the `@automation/*` packages it uses in `package.json` with a version range, like any other dependency:
+
+```jsonc
+"dependencies": {
+  "@automation/referenced-automation-utils": "^1.0.0"
+}
+```
+
+To take a newer version, **change that number** (say `"^1.3.0"`), run `npm install`, run the tests and commit `package.json` and `package-lock.json`. npm downloads the new version from the registry in `NPM_REGISTRY_URL`; nothing is built, copied or placed by hand.
+
+- `^1.3.0` accepts any `1.x` from 1.3.0 up (what `npm update` moves to); write `1.3.0` to pin exactly.
+- `npm ci` (CI, `setup.sh`) installs exactly what the lockfile records, so a version only changes when someone commits a change.
+- The lockfile in this repo records the version of each `@automation/*` package but not where it came from. The first `npm install` against the real registry adds that (`resolved` and `integrity`); commit the result.
+- A package that is itself depended on (`utils`, `api`, `ui`, `sap`) must be published again before its consumers can ask for the new version - see [Publishing a package](#publishing-a-package-to-the-registry-jfrog-artifactory) in that repo.
+
+## Using a package without a registry (local generation)
+
+Use this when the packages are not in a registry yet, or you want to try a change before publishing it. Nothing in `package.json` or the lockfile changes.
+
+**Automatic - when the repos are checked out next to each other:**
 
 ```bash
-./scripts/create-package.sh   # writes ../shared-packages/referenced-automation-api-<version>.tgz
+./scripts/setup.sh --local          # Windows: scripts\setup.bat --local
 ```
+
+It builds the sibling repos this one depends on (`referenced-automation-utils`) with their own `scripts/create-package.sh --local`, keeps the `.tgz` files in `../shared-packages` and installs them.
+
+**Manual - generating a tarball and placing it yourself** (for example when the consuming repo is on another machine):
+
+1. Generate a tarball of each package this repo needs, in that package's own repo (`--local` builds what it depends on in turn, without needing the registry):
+   ```bash
+   (cd ../referenced-automation-utils && ./scripts/create-package.sh --local)
+   ```
+   Each file is named `automation-<package>-<version>.tgz` after the version in that repo's `package.json` and lands in `../shared-packages`.
+2. Leave the files in `../shared-packages`, or copy them into the consuming repo (any folder works, for example `libs/` - keep it out of git).
+3. Install them, all in one command (change the folder if you copied the files elsewhere):
+   ```bash
+   npm install --no-save ../shared-packages/automation-referenced-automation-utils-<version>.tgz
+   ```
+   `--no-save` keeps `package.json` and the lockfile unchanged. Run it again after every `npm ci`, because `npm ci` removes what is not in the lockfile. When you rebuild a tarball with the same version, run the command again to pick up the new contents.
+4. Build and test as usual (`npm run build`, `npm test`).
+
+When you are done experimenting, run `npm ci` to go back to what the registry provides.
 
 ## IDE setup
 
