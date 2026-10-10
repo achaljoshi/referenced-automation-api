@@ -1,0 +1,36 @@
+{
+  "ignore": [
+    {
+      "rule": "ci-security-nonblocking",
+      "path": "",
+      "reason": "The security job has never run on the real GitLab; ADR 0009 keeps it non-blocking until its first green run, then it moves to allow_failure: { exit_codes: 2 } (see the template in referenced-automation-utils).",
+      "expires": "2026-12-31"
+    },
+    {
+      "rule": "sleep-promise",
+      "path": "tests/apiAdvanced.spec.ts",
+      "reason": "simulates 5 ms of async work to prove the concurrency limit; nothing waits for an application"
+    },
+    {
+      "rule": "sleep-promise",
+      "path": "tests/mock/mockServer.spec.ts",
+      "reason": "an async handler that deliberately takes a moment before failing"
+    },
+    {
+      "rule": "sleep-promise",
+      "path": "tests/auth.spec.ts",
+      "reason": "real time must pass for a 1 s access token to expire; elapsed time is the thing under test"
+    },
+    {
+      "rule": "test-skipped",
+      "path": "tests/generated/examples.spec.ts",
+      "reason": "generated example showing how the curl converter marks a not-yet-deployed endpoint"
+    },
+    {
+      "rule": "assert-weak-throw",
+      "path": "tests/apiAdvanced.spec.ts",
+      "reason": "negative control: the point is that the call must not succeed; assert the error message instead of any error (to do)",
+      "expires": "2027-01-31"
+    }
+  ]
+}

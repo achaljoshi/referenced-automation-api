@@ -21,7 +21,8 @@ import {
 } from '../src/auth/authProvider';
 import { formatExchanges, redactBody, redactFields, redactHeaders } from '../src/client/exchange';
 import { maskFields, subsetDifferences } from '../src/client/subset';
-import { mapConcurrent, pollUntil, PollTimeoutError } from '../src/util/poll';
+import { defaultPollTimeoutMs, mapConcurrent, pollUntil, PollTimeoutError } from '../src/util/poll';
+import { safeUrl } from '../src/client/logging';
 import { toCurl } from '../src/curl/toCurl';
 import { startTestServer, stopTestServer, type TestServerHandle } from './support/testServer';
 
@@ -130,14 +131,34 @@ test.describe('polling', () => {
         pathParams: { id },
         until: (r) => r.get('state') === 'DONE',
         intervalsMs: [5],
-        timeoutMs: 60,
+        // generous against a slow machine: with the old 60 ms a single slow request used up the whole budget and attempts was 1
+        timeoutMs: 500,
         description: 'the job to finish',
       })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(PollTimeoutError);
-    expect((error as PollTimeoutError).message).toMatch(/the job to finish/);
-    expect((error as PollTimeoutError).message).toMatch(/PENDING/);
+    expect((error as PollTimeoutError).message).toMatch(/Poll timed out waiting for the job to finish/);
+    expect((error as PollTimeoutError).message).toMatch(/last response: 200 .*PENDING/);
     expect((error as PollTimeoutError).attempts).toBeGreaterThan(1);
+  });
+
+  test.describe('the default poll limit leaves room before the test timeout @regression', () => {
+    test.describe.configure({ timeout: 3000 });
+
+    test('derived from the running test: at most 80% of what is left, and the poll fails first with its own message', async () => {
+      expect(defaultPollTimeoutMs()).toBeLessThanOrEqual(2400);
+      const startedAt = Date.now();
+      const error = await pollUntil(
+        async () => 'still waiting',
+        () => false,
+        { intervalsMs: [20], description: 'a thing that never happens' },
+      ).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PollTimeoutError);
+      expect((error as Error).message).toMatch(/Poll timed out waiting for a thing that never happens/);
+      expect((error as Error).message).toMatch(/last response: "?still waiting/);
+      // well inside the 3000 ms the test is allowed (the old default was 30 s, so "Test timeout" fired first)
+      expect(Date.now() - startedAt).toBeLessThan(2900);
+    });
   });
 
   test('pollUntil works for any async value, and mapConcurrent limits how many run at once', async () => {
@@ -508,5 +529,98 @@ test.describe('CleanupRegistry', () => {
     expect(order).toEqual(['third', 'second', 'first']);
     expect(registry.pending).toBe(0);
     await registry.run(); // nothing left: a no-op
+  });
+});
+
+test.describe('retries are visible in the report @regression', () => {
+  test('a call that needed retries leaves an api-retries annotation with the statuses', async () => {
+    const scoped = client.scoped().setRetryPolicy({ attempts: 4, backoffMs: 1 });
+    expect((await scoped.get(`/flaky/${key()}?fail=2`)).status()).toBe(200);
+    const notes = test.info().annotations.filter((a) => a.type === 'api-retries');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.description).toMatch(/GET .*\/flaky\/.*: 2 retries \(503, 503, 200\)/);
+  });
+
+  test('a call that did not need a retry adds nothing', async () => {
+    await client.get('/users');
+    expect(test.info().annotations.filter((a) => a.type === 'api-retries')).toHaveLength(0);
+  });
+
+  test('retries that end in a network error are annotated too', async () => {
+    const dead = new ApiClient(context, 'http://127.0.0.1:1');
+    await dead.get('/x', { retry: { attempts: 2, backoffMs: 1 } }).catch(() => undefined);
+    const note = test.info().annotations.find((a) => a.type === 'api-retries');
+    expect(note?.description).toMatch(/1 retry \(network error, network error\)/);
+  });
+});
+
+test.describe('the exchange log hides credentials wherever they are @regression', () => {
+  test('XML element values are masked by name, request and response, SOAP prefixes included', async () => {
+    const scoped = new ApiClient(context, server.baseUrl);
+    await scoped.post('/xml-echo', {
+      xml: '<Login><User>ada</User><Password>hunter2</Password><soap:Token>tok-777</soap:Token><Card secret="4321">x</Card></Login>',
+    });
+    const [exchange] = scoped.exchanges();
+    expect(exchange?.requestBody).toBe(
+      '<Login><User>ada</User><Password>[REDACTED]</Password><soap:Token>[REDACTED]</soap:Token><Card secret="[REDACTED]">x</Card></Login>',
+    );
+    expect(exchange?.requestBody).not.toMatch(/hunter2|tok-777|4321/);
+
+    // and a response: the token in a login answer, and the session cookie that comes with it
+    const login = new ApiClient(context, server.baseUrl);
+    await login.post('/login-xml', { xml: '<Login/>' });
+    expect(login.exchanges()[0]?.responseBody).toBe(
+      '<LoginResponse><Token>[REDACTED]</Token><User>ada</User></LoginResponse>',
+    );
+    expect(formatExchanges([...login.exchanges()])).not.toMatch(/live-token-value|live-session-value/);
+  });
+
+  test('a numeric secret is masked (password: 123456), and so is an object under a secret name', () => {
+    expect(redactFields({ password: 123456, pin: 9999, token: { value: 'abc' }, retries: 3, authorized: true })).toEqual({
+      password: '[REDACTED]',
+      pin: 9999, // `pin` is not on the exchange list; the converter has its own
+      token: '[REDACTED]',
+      retries: 3,
+      authorized: true,
+    });
+    expect(redactBody('{"password":123456,"name":"Ada"}', 'application/json')).toBe(
+      '{"password":"[REDACTED]","name":"Ada"}',
+    );
+  });
+
+  test('response headers are stored masked: Set-Cookie is not kept in the exchange', async () => {
+    const scoped = new ApiClient(context, server.baseUrl);
+    const response = await scoped.get('/cookies/set');
+    expect(response.cookies().map((c) => c.name)).toContain('session'); // the response itself is untouched
+    const exchange = scoped.exchanges()[0];
+    expect(exchange?.responseHeaders?.['set-cookie']).toBe('[REDACTED]');
+    expect(JSON.stringify(exchange)).not.toContain('abc123');
+    expect(exchange?.responseHeaders?.['content-type']).toContain('json');
+  });
+
+  test('a token in the URL path is masked in the exchange, the log URL and a failure message', async () => {
+    const token = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8'; // 36 characters, letters and digits
+    const scoped = new ApiClient(context, server.baseUrl);
+    await scoped.get(`/reset/${token}`);
+    await scoped.get('/users/1');
+    const [reset, users] = scoped.exchanges();
+    expect(reset?.url).toBe(`${server.baseUrl}/reset/[REDACTED]`);
+    expect(users?.url).toBe(`${server.baseUrl}/users/1`);
+    const dead = new ApiClient(context, 'http://127.0.0.1:1');
+    await dead.get(`/session/token/abc12345678/x?apiKey=live-key-99`).catch(() => undefined);
+    expect(JSON.stringify(dead.exchanges())).not.toMatch(/abc12345678|live-key-99/);
+  });
+
+  test('safeUrl keeps ordinary ids and endpoints readable', () => {
+    for (const url of [
+      'https://h/users/42',
+      'https://h/users/5f1d7f3e9b1a4c2d8e6f7a8b', // a 24-character object id
+      'https://h/users/3f2504e0-4f89-11d3-9a0c-0305e82c3301', // a UUID
+      'https://h/auth/login',
+      'https://h/token/refresh',
+    ])
+      expect(safeUrl(url)).toBe(url);
+    expect(safeUrl('https://h/x/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln')).toBe('https://h/x/[REDACTED]');
+    expect(safeUrl('/tokens/abcdef123456')).toBe('/tokens/[REDACTED]');
   });
 });

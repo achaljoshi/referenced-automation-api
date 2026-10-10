@@ -68,7 +68,8 @@ set "REPO_DIR=..\%REPO_NAME%"
 if not exist "%REPO_DIR%" (
   echo ERROR: %REPO_NAME% is not packaged and not checked out at %REPO_DIR%. 1>&2
   echo Clone it as a sibling of this repo first: 1>&2
-  echo   git clone https://github.com/achaljoshi/%REPO_NAME%.git %REPO_DIR% 1>&2
+  echo   git clone ^<internal-git-server-url^>/%REPO_NAME%.git %REPO_DIR% 1>&2
+  echo Clone from your internal Git server: the network here does not reach public GitHub. 1>&2
   exit /b 1
 )
 echo == Building %REPO_NAME% (dependency) ==

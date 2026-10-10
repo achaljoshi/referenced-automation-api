@@ -29,7 +29,9 @@
     "allure:generate": "allure generate allure-results --clean -o allure-report",
     "allure:open": "allure open allure-report",
     "allure:report": "npm run allure:generate && npm run allure:open",
-    "security": "automation-audit-gate && automation-scan-secrets",
+    "security": "automation-audit-gate --allow-unassigned && automation-scan-secrets",
+    "audit": "automation-framework-audit --run",
+    "audit:quick": "automation-framework-audit",
     "convert:curl": "node dist/cli/curlToTests.js"
   },
   "dependencies": {

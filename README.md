@@ -45,17 +45,19 @@ test('gets a user', async ({ apiClient }) => {
 |---|---|
 | All HTTP methods | `client.get/post/put/patch/delete/head/options(path, options)` |
 | Header CRUD | `setHeader`/`setHeaders`/`getHeader`/`removeHeader`/`clearHeaders` on the client (persists across calls); per-call `options.headers` overrides without mutating the client |
-| Query params | `options.queryParams` - array values are sent as repeated `key=a&key=b` |
-| Path params | `options.pathParams` substitutes `{name}` placeholders, e.g. `/users/{id}` |
+| Base URL and paths | A path is joined to the client's base URL and keeps the base URL's own path: base `https://gw/api/v1` + `/users` is `https://gw/api/v1/users`. A full URL in place of a path is refused (it would take the client's auth and headers to another host) unless the call says `absoluteUrl: true` |
+| Query params | `options.queryParams` - array values are sent as repeated `key=a&key=b`; a query written in the path (`/search?a=1`) is merged with them |
+| Path params | `options.pathParams` substitutes `{name}` placeholders, e.g. `/users/{id}`; a placeholder with no value throws instead of being sent as `{id}` |
 | JSON body | `options.json` |
 | XML body | `options.xml` - pass an object (serialized via `fast-xml-parser`) or a raw string |
 | Form body | `options.form` - `application/x-www-form-urlencoded` |
 | Multipart body | `options.multipart` - text fields and files (`buffer` or `filePath`) in the same object |
-| Auth | `BasicAuth`, `BearerAuth` (static token or async supplier), `ApiKeyAuth` (header or query), `OAuth2ClientCredentials` (fetches + caches + auto-refreshes a token) |
-| Pagination | `paginateByPageNumber()` and `paginateByCursor()` - collect every page into one array |
+| Auth | `BasicAuth`, `BearerAuth` (static token or async supplier), `ApiKeyAuth` (header or query), `OAuth2ClientCredentials` (fetches + caches + auto-refreshes a token), `OAuth2PasswordAuth`, `SessionCookieAuth`. Token and login calls go through the client's own connection (proxy, TLS, timeout; they show in `exchanges()` with credentials masked), parallel requests share ONE token request / login, a `401` makes `SessionCookieAuth` log in again and resend once, and a failure message never repeats the identity provider's body |
+| Pagination | `paginateByPageNumber()` and `paginateByCursor()` - collect every page into one array. Every page must be 2xx (a failing page throws with its number and status); reaching `maxPages` with more data left throws unless `allowTruncation: true`; an empty-string cursor ends the loop; a cursor that repeats throws |
 | Response traversal | `response.get('data.users[0].name')`, `.has(path)`, `.require(path)` |
 | Response validation | `response.expectStatus()`, `.expectValue()`, `.expectSchema()` (JSON Schema via `ajv`), or just assert on `.status()`/`.get()`/`.body()` with Playwright's own `expect` |
-| Response format handling | Body is parsed based on `Content-Type` - JSON and XML both come back as a traversable object; anything else stays as text |
+| Response format handling | Body is parsed based on `Content-Type` - JSON and XML both come back as a traversable object; anything else stays as text. XML values stay TEXT (`<ref>00123</ref>` is `'00123'`, not `123`) - convert in the test when you need a number |
+| GraphQL | `expectNoGraphqlErrors()` needs a JSON response with `data` or `errors`: an HTML 502, an empty body or `{ "data": null }` fails instead of passing |
 
 ## Mocking
 
@@ -84,6 +86,8 @@ await server.stop();
 ```
 
 `.get/.post/.put/.patch/.delete(path, body, options?)` cover the common case - `body` can be a static value or `(req) => value`; `options` sets `status`/`headers`/`delayMs`. `.route()` is the escape hatch when status/headers need to be computed together with the body. Unregistered routes get a JSON 404 automatically; `.reset()` clears everything registered so far. A `mockServer` fixture is also available from this package's own `test` (`import { test } from '@automation/referenced-automation-api'`) - started before the test, stopped after, only paid for by tests that ask for it.
+
+`MockServer` listens on `127.0.0.1` only (a mock must not be reachable from the runner's network); a handler that throws or rejects answers `500 { error: "Mock handler threw: ..." }` instead of leaving the request hanging; `stop()` drops open connections, so it never waits for a slow or keep-alive request, and `start()` rejects when the port is taken.
 
 ### 2. `mockApiRoute` - runtime data mocking for UI tests, via `page.route()`
 
@@ -122,7 +126,9 @@ await playApiRecording(page, 'recordings/checkout.json', 'https://api.example.co
 await page.goto('https://example.com/checkout'); // served entirely from the recording
 ```
 
-Matching during playback defaults to method + exact URL (including query string); pass `{ matchBy: 'url' }` to ignore method. A request inside the pattern with no matching recorded entry falls through to the real network by default (`route.fallback()`) - pass `onUnmatched` to handle that case yourself instead (e.g. fail the test loudly rather than silently hitting a real backend). Response bodies are stored base64-encoded, so binary responses (images, gzip) round-trip correctly.
+Credentials are redacted **as the traffic is recorded**: Authorization/Cookie/API-key style headers are masked and `Set-Cookie` is not stored, `password` / `token` / `secret` fields in JSON, form and XML bodies (request and response) are masked, and so are credentials in the URL query and token-like path segments - the file is safe to commit, and a replayed login returns the masked value. (Other secrets under names the redaction does not know are stored as they came: look at a recording before committing it.)
+
+Matching during playback defaults to method + exact URL (including query string, compared with credentials masked on both sides); pass `{ matchBy: 'url' }` to ignore method and `{ ignoreQueryParams: ['_', /^ts/] }` to leave volatile parameters out of the comparison. A request inside the pattern with no matching recorded entry **fails** by default (`onMiss: 'fail'`): it is refused (the page sees a network error), logged, and listed in the `unmatched` array of the handle `playApiRecording` returns - it never reaches the live network, so a replay cannot quietly depend on a real backend. `onMiss: 'continue'` sends it to the real network (`route.fallback()`); `onUnmatched` handles it yourself. Response bodies are stored base64-encoded, so binary responses (images, gzip) round-trip correctly.
 
 ## Gherkin / BDD (`playwright-bdd` 9.2.1)
 
@@ -155,7 +161,9 @@ registerApiSteps({ Given, When, Then });     // requests, auth, headers, bodies,
 `npm test` runs `bddgen && playwright test`; `npm run test:bdd` only the features; `BDD_TAGS` is not needed - use `--grep @smoke`.
 Every string, docstring and table cell understands `{{placeholders}}` (saved values, `{{env:X|fallback}}`, `{{uuid}}`, `{{random:email}}`, `{{date:+7d}}`);
 an unresolvable one fails the step. The sample features in `features/` run against the in-process server in `tests/support/testServer.ts`.
-`registerDataSteps` is also in the UI package - when a project's features use both, register it once.
+`registerDataSteps` is also in the UI package, with the SAME step texts - when a project's features use both, register it once (from either package), or the BDD tool reports ambiguous steps.
+
+Equality steps are typed: `the response field "id" equals "1"` matches only the JSON *string* `"1"`; use `equals 1` for a number, `is true` / `is false` for booleans, and `equals "1" as text` to compare the text form of any value. `is not empty` rejects `null`, `""`, `[]` and `{}`; a number (`0` included) or `false` is a value - assert those with `equals 0` / `is false`. The polling step (`returns "x" equal to "y"`) compares the text form.
 
 ## curl in, tests out (`api-curl-to-playwright`)
 
@@ -187,7 +195,7 @@ const CONSTANTS = {                                   // what every command send
 const ENDPOINTS = { users: '/users' };                // where each call goes
 
 test('Create a user @api', async ({ apiClient }) => {
-  apiClient.setAuth(new BearerAuth(env.get('API_TOKEN')));          // the token is never written into the test
+  apiClient.setAuth(new BearerAuth(env.get('API_TOKEN')));          // the token is read from the environment, not written into the test
   const response = await apiClient.post(ENDPOINTS.users, { json: CONSTANTS.bodies.createAUser, maxRedirects: 0 });
   expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(CONSTANTS.expected.createAUser.status);
   expect(response.get('name')).toBe(CONSTANTS.expected.createAUser.json.name);
@@ -197,7 +205,8 @@ test('Create a user @api', async ({ apiClient }) => {
 Change a body, a query parameter, a header or an expected value in `CONSTANTS`; move an endpoint in `ENDPOINTS` - every step that uses it follows. Values that read the environment (passwords, tokens, anything named like a secret) are getters, so a missing variable names itself when it is used; values that only exist while a flow runs (`{{userId}}` saved from an earlier step) stay in the step. `--inline` writes everything in the steps instead.
 
 - Calls map onto the framework: `apiClient.get/post/...`, `queryParams`, `json` / `form` / `xml` / `multipart` / `rawBody`, `BearerAuth` / `BasicAuth` / `ApiKeyAuth`, `timeoutMs`; the host moves to `API_BASE_URL` (kept in full when the commands call several hosts, or with `--keep-host`).
-- **Secrets are never written**: anything named like a password, token, secret, api key, authorization or cookie - in a header, query, form field or JSON key, and `-u user:pass` - is read with `env.get('API_...')`; the command prints which variables to set. `--param 'accountNumber=ACCOUNT'` adds more; `# secret: inline` writes deliberately fake credentials (a wrong-password test) as they are.
+- **Secrets the converter recognises are read from the environment, not written into the file** - it is not a guarantee that no secret is written. Recognised: anything NAMED like a password (`password`, `passwd`, `pwd`), `pin`, `otp`, token, secret (`client_secret`), credential, api key (`x-api-key`), authorization, signature, session or cookie - in a header, query, form field, JSON key or XML element/attribute - plus `-u user:pass`, and a token-looking URL path segment (a JWT, a long opaque string, the value after `/token/`). They become `env.get('API_...')` getters; the command prints which variables to set. A secret under any OTHER name, or one in free text, is written as it was in the curl command - `--param 'accountNumber=ACCOUNT'` adds names, and **review the generated file before committing it**. `# secret: inline` writes deliberately fake credentials (a wrong-password test) as they are.
+- The command **will not overwrite** an existing spec (it may hold edits): it stops with a message and writes nothing unless you pass `--force`. A spec written inside a Playwright project reads its `.env.<ENV>` files from that project's folder, whatever directory the run starts in. A full URL (several hosts, `--keep-host`) is sent with `absoluteUrl: true`.
 - Without `-L` curl does not follow redirects, so the test sets `maxRedirects: 0` (`--follow-redirects` changes that). `$VAR` / `${VAR}` in a command become environment reads. Browser-added headers (sec-fetch-*, user-agent, accept-language) are dropped unless `--keep-all-headers`.
 - Anything that could not be converted exactly is listed (`note:`), and `--strict` turns that into a failure. `toCurl(request)` goes the other way - a pasteable command from a request, credentials masked.
 
@@ -211,12 +220,13 @@ Change a body, a query parameter, a header or an expected value in `CONSTANTS`; 
 await client.get('/flaky', { retry: { attempts: 4 } });                          // 429/502/503/504 with backoff and Retry-After
 await client.post('/orders', { json, idempotencyKey: true, retry: { attempts: 3 } }); // safe to repeat
 const done = await client.poll('GET', '/jobs/{id}', { pathParams: { id }, until: (r) => r.get('state') === 'DONE' });
+// poll's default limit is 30 s, but never more than 80% of what is left of the test's timeout, and a timeout reads "Poll timed out ...; last response: ..."
 await expect(response).toMatchJsonSubset({ name: 'Ada' });                       // extra matchers on an ApiResponse
-const admin = await apiFor({ auth: new BearerAuth(adminToken) });                // a client for another user
+const admin = await apiFor({ auth: new BearerAuth(adminToken) });                // a client for another user (keeps the project's proxy/TLS/headers; does NOT inherit the main client's Authorization/Cookie headers)
 cleanup.add('order', () => client.delete('/orders/{id}', { pathParams: { id } })); // undone after the test, newest first
 ```
 
-A failed test attaches every call it made (credentials masked) as `api-exchanges.txt`; `response.exchange` and `toCurl()` reproduce one in a terminal.
+A failed test attaches every call it made as `api-exchanges.txt`; `response.exchange` and `toCurl()` reproduce one in a terminal. Credentials are masked in what is stored: header values (response `Set-Cookie` included), JSON / form / **XML** fields and elements by name (numbers too - `password: 123456`), query values and token-like URL path segments, and URLs in error messages. A call that needed the client's retry policy leaves an `api-retries` annotation on the test (`GET /flaky/x: 2 retries (503, 503, 200)`), so a green test that leaned on retries shows in the report.
 
 ## Correlation and logging
 
@@ -224,7 +234,7 @@ The built-in `test` has an auto fixture that gives every test a correlation ID. 
 
 ## Environments
 
-Same pattern as every other repo in this family: `.env.<name>` files + `ENV=<name>`. See `.env.qa`/`.env.stage`/`.env.dev` here, and `referenced-automation-utils`' README for the full explanation. `playwright.config.ts` reads `API_BASE_URL` from the active env file and uses it as `use.baseURL`.
+Same pattern as every other repo in this family: `.env.<name>` files + `ENV=<name>`. See `.env.qa`/`.env.stage`/`.env.dev` here, and `referenced-automation-utils`' README for the full explanation. `playwright.config.ts` reads `API_BASE_URL` from the active env file and uses it as `use.baseURL`. The `apiClient` fixture is built on Playwright's own `request` fixture, so the project's `use` options (`ignoreHTTPSErrors`, `proxy`, `extraHTTPHeaders`, `httpCredentials`, `clientCertificates`, timeouts) apply to it and to `apiFor` clients, and its base URL is `use.baseURL`, else `API_BASE_URL` from the `.env.<ENV>` files next to the Playwright config (not the working directory, so an IDE run and CI agree).
 
 ```bash
 ENV=stage npx playwright test
@@ -328,4 +338,4 @@ Same as `referenced-automation-utils`: VS Code prompts for the recommended exten
 
 `tests/mock/` is the working test suite for the three mocking tools themselves: `mockServer.spec.ts` (static/dynamic bodies, custom status/headers, `reset()`, `delayMs`), `routeMock.spec.ts` (`mockApiRoute` against a `*.invalid` host, so a pass genuinely proves interception rather than a lucky real response), and `recorder.spec.ts` (records against the real `testServer`, stops it, then proves playback still works with no backend at all).
 
-`tests/utilsMethods.spec.ts` demos every reusable method `@automation/referenced-automation-utils` exports, framed the way this repo actually uses them - generating request payloads (`randomUtils`), masking/hashing sensitive data (`crypto`), asserting on response dates (`dateUtils`), traversing/validating a real response body (`getPath`/`validateSchema`), and verifying a mocked endpoint's side effects against a real DB row (`SqliteClient`), a real sent email (`SmtpClient`), and a real uploaded file (`SftpClient`) - not just "does the function work in isolation." (No `referenced-automation-sap` demo here - its Fiori/UI5 helpers are `Page`-based and this repo's tests don't drive a browser, so there's no real use case for it.)
+`tests/utilsContract.spec.ts` is a thin check that what this package imports from `@automation/referenced-automation-utils` is still exported there; the behaviour of utils itself (crypto, dates, random data, DB, e-mail, SFTP ...) is tested in the utils package, which owns it.

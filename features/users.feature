@@ -39,7 +39,8 @@ Feature: Users API
       """
     Then the response field "patched" is true
     And the response field "nickname" equals "countess"
-    And the response field "id" equals "{{userId}}"
+    And the response field "id" equals "{{userId}}" as text
+    And the response field "id" equals 42
 
   Scenario: A user that does not exist
     When I send a GET request to "/users/999"

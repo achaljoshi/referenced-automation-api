@@ -27,6 +27,11 @@ const SENSITIVE_FIELD =
   /pass(word|wd|code)?|secret|token|api[-_]?key|credential|authorization|signature/i;
 export const REDACTED = '[REDACTED]';
 
+/** True for a header that carries a credential (Authorization, Cookie, Set-Cookie, X-Api-Key ...). */
+export function isCredentialHeader(name: string): boolean {
+  return SENSITIVE_HEADER.test(name);
+}
+
 export function redactHeaders(headers: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(headers).map(([name, value]) => [
@@ -36,21 +41,47 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
   );
 }
 
-/** Masks the value of every key that looks like a credential, at any depth. */
+/**
+ * Masks the value of every key that looks like a credential, at any depth. Text, numbers (`password: 123456`) and
+ * whole objects/arrays under such a key are masked; `true`/`false`/`null` are left, they say nothing secret.
+ */
 export function redactFields<T>(value: T): T {
   if (Array.isArray(value)) return value.map((item) => redactFields(item)) as unknown as T;
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, item]) => [
         key,
-        SENSITIVE_FIELD.test(key) && typeof item === 'string' ? REDACTED : redactFields(item),
+        SENSITIVE_FIELD.test(key) && item !== null && typeof item !== 'boolean'
+          ? REDACTED
+          : redactFields(item),
       ]),
     ) as T;
   }
   return value;
 }
 
-/** A request body as text with credentials masked: JSON and form bodies are parsed and masked by field name, anything else is left as is. */
+/**
+ * XML with the text of every element whose NAME looks like a credential (`<Password>`, `<soap:Token>`, `<ApiKey>`)
+ * and every attribute of that kind (`password="..."`) masked. Works on the text, so it also covers a SOAP envelope
+ * that is not well-formed enough to parse.
+ */
+export function redactXml(xml: string): string {
+  return xml
+    .replace(
+      /(<((?:[\w.-]+:)?([\w.-]+))(?:\s[^<>]*)?>)([^<]+)(<\/\2\s*>)/g,
+      (match, open: string, _qualified: string, local: string, text: string, close: string) =>
+        SENSITIVE_FIELD.test(local) && text.trim() !== '' ? `${open}${REDACTED}${close}` : match,
+    )
+    .replace(
+      /(\s)([\w.:-]+)(\s*=\s*)(["'])([^"']*)\4/g,
+      (match, space: string, name: string, eq: string, quote: string) =>
+        SENSITIVE_FIELD.test(name.split(':').pop() ?? name)
+          ? `${space}${name}${eq}${quote}${REDACTED}${quote}`
+          : match,
+    );
+}
+
+/** A request body as text with credentials masked: JSON, form and XML bodies are masked by field/element name, anything else is left as is. */
 export function redactBody(
   body: string | undefined,
   contentType: string | undefined,
@@ -69,6 +100,7 @@ export function redactBody(
   } catch {
     // not parseable: fall through and return it untouched
   }
+  if (type.includes('xml') || /^\s*<[?!\w]/.test(body)) return redactXml(body);
   return body;
 }
 

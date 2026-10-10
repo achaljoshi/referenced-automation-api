@@ -43,8 +43,8 @@ ensure_package() {
   local repo_dir="../${repo_name}"
   if [ ! -d "$repo_dir" ]; then
     echo "ERROR: ${repo_name} is not packaged and not checked out at ${repo_dir}." >&2
-    echo "Clone it as a sibling of this repo first:" >&2
-    echo "  git clone https://github.com/achaljoshi/${repo_name}.git ${repo_dir}" >&2
+    echo "Clone it as a sibling of this repo first (from your internal Git server - the network here does not reach public GitHub):" >&2
+    echo "  git clone <internal-git-server-url>/${repo_name}.git ${repo_dir}" >&2
     exit 1
   fi
   echo "== Building ${repo_name} (dependency) =="

@@ -6,7 +6,7 @@ Feature: Background work and flaky services
     Given I generate a random uuid called "jobId"
     When I wait until a GET request to "/jobs/{{jobId}}" returns "state" equal to "DONE" within 10 seconds
     Then the response field "state" equals "DONE"
-    And the response field "reads" equals "3"
+    And the response field "reads" equals 3
 
   Scenario: A brief outage is retried
     Given I generate a random uuid called "key"

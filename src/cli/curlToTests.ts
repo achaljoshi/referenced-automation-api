@@ -28,6 +28,8 @@ Usage:
 Options:
   --out <file.ts|folder>   Where to write the spec(s). Default: tests/generated/<name>.spec.ts
   --stdout                 Print the generated test instead of writing a file.
+  --force                  Overwrite a spec file that already exists. Without it the command stops and writes nothing:
+                           the file may hold edits (or secrets someone filled in) that a regeneration would lose.
   --test-import <module>   Module \`test\` and \`expect\` come from. Default: @automation/referenced-automation-api.
                            Point it at your own base test (a relative path) to add your project's fixtures.
   --api-import <module>    Module the auth classes come from. Default: @automation/referenced-automation-api.
@@ -43,7 +45,10 @@ Options:
   --param <name-regex>=<ENV_VAR>
                            Read the value of any header / query parameter / form field / JSON key whose NAME matches from an
                            environment variable instead of writing it into the test. Repeatable. Anything named like a
-                           password, token, secret, api key, authorization or cookie is handled without this.
+                           password (pwd, passwd), pin, otp, token, secret, credential, api key, authorization, session or
+                           cookie - in a header, query, form field, JSON key or XML element - and a token in a URL path is
+                           handled without this. Review the output before committing: a secret under another name is
+                           written as it is.
   --flow                   Make all commands one test, each a step.
   --title <text>           Title of the wrapping describe. Default: the file name.
   --strict                 Exit with an error if anything could not be converted exactly.
@@ -54,6 +59,7 @@ interface Options {
   input: string;
   out: string;
   stdout: boolean;
+  force: boolean;
   testImport?: string;
   apiImport?: string;
   tag?: string;
@@ -72,6 +78,7 @@ function parseArgs(argv: string[]): Options {
     input: '',
     out: '',
     stdout: false,
+    force: false,
     keepHost: false,
     inline: false,
     followRedirects: false,
@@ -92,6 +99,7 @@ function parseArgs(argv: string[]): Options {
       process.exit(0);
     } else if (arg === '--out') opts.out = value();
     else if (arg === '--stdout') opts.stdout = true;
+    else if (arg === '--force') opts.force = true;
     else if (arg === '--test-import') opts.testImport = value();
     else if (arg === '--api-import') opts.apiImport = value();
     else if (arg === '--tag') opts.tag = value();
@@ -137,11 +145,45 @@ function inputFiles(input: string): Array<{ label: string; text: string; base: s
   }));
 }
 
+/** Where a spec for `file` is written. */
+function targetFor(opts: Options, file: { base: string }, fileCount: number): string {
+  return opts.out.endsWith('.ts') && fileCount === 1
+    ? opts.out
+    : path.join(opts.out || path.join('tests', 'generated'), `${file.base}.spec.ts`);
+}
+
+/** The folder with the Playwright config at or above the folder `target` is written to (where `.env.<ENV>` lives), as a path relative to that folder - or undefined when there is none. */
+function projectDirFor(target: string): string | undefined {
+  const targetDir = path.dirname(path.resolve(target));
+  let current = targetDir;
+  for (;;) {
+    if (
+      fs.existsSync(current) &&
+      fs.readdirSync(current).some((f) => /^playwright\.config\.(ts|js|mjs|cjs)$/.test(f))
+    )
+      return path.relative(targetDir, current).split(path.sep).join('/') || '.';
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   const files = inputFiles(opts.input);
+  if (!opts.stdout && !opts.force) {
+    const existing = files
+      .map((file) => targetFor(opts, file, files.length))
+      .filter((target) => fs.existsSync(target));
+    if (existing.length > 0)
+      throw new Error(
+        `Not overwriting ${existing.join(', ')}: ${existing.length === 1 ? 'it already exists' : 'they already exist'} and may hold edits. Nothing was written. Use --force to replace ${existing.length === 1 ? 'it' : 'them'}, or --out to write somewhere else.`,
+      );
+  }
   let anyWarning = false;
   for (const file of files) {
+    const target = opts.stdout ? undefined : targetFor(opts, file, files.length);
+    const projectDir = target ? projectDirFor(target) : undefined;
     const result = convertCurl(file.text, {
       source: file.label,
       testImport: opts.testImport,
@@ -154,14 +196,11 @@ function main(): void {
       params: opts.params,
       singleFlow: opts.singleFlow,
       title: opts.title,
+      projectDir,
     });
-    if (opts.stdout) {
+    if (target === undefined) {
       process.stdout.write(result.code);
     } else {
-      const target =
-        opts.out.endsWith('.ts') && files.length === 1
-          ? opts.out
-          : path.join(opts.out || path.join('tests', 'generated'), `${file.base}.spec.ts`);
       fs.mkdirSync(path.dirname(path.resolve(target)), { recursive: true });
       fs.writeFileSync(target, result.code);
       process.stderr.write(

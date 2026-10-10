@@ -102,6 +102,7 @@ build:
     - npm ci
     - npm run build
     - npm run lint
+    - npm run typecheck
   artifacts:
     paths:
       - dist/
@@ -139,14 +140,43 @@ security:
   script:
     - npm ci
     - npx automation-scan-secrets
-    - npx automation-audit-gate
+    - npx automation-audit-gate --allow-unassigned
+
+# The Allure report. It uses the allure-commandline version pinned in package.json (devDependency) rather than an
+# unpinned global install, and it needs a Java runtime (the Allure CLI is a Java program): the Playwright image used
+# above may not have one - if `java -version` fails here, use an image that has it (or one that adds it). The job takes
+# allure-results from the `test` job's artifacts and only publishes when there are results to publish.
+# ---- Fortnightly framework audit (start it by hand: "Run pipeline" is not needed, use this job's play button) ----
+#
+# The automated part of the audit (docs/governance/AUDIT.md in referenced-automation-utils): waits, skips, assertions,
+# traceability, dependencies, governance files, pipeline and documentation consistency. The report is the job's artifact.
+# Set AUDIT_RUN_GATES=1 on the pipeline to also run lint, typecheck, test and security inside this job (slow).
+audit:
+  stage: report
+  needs: ["build"]
+  when: manual
+  allow_failure: true
+  script:
+    - npm ci
+    - npx automation-framework-audit --out audit-reports ${AUDIT_RUN_GATES:+--run}
+  artifacts:
+    when: always
+    paths:
+      - audit-reports/
+    expire_in: 90 days
 
 pages:
   stage: report
   needs: ["test"]
   script:
-    - npm install -g allure-commandline --silent
-    - allure generate allure-results --clean -o public
+    - |
+      if [ ! -d allure-results ] || [ -z "$(ls -A allure-results 2>/dev/null)" ]; then
+        echo "No allure-results from the test job - nothing to publish."
+        exit 0
+      fi
+    - java -version || { echo "The Allure CLI needs Java, which this image does not have - see the comment above the pages job." >&2; exit 1; }
+    - npm ci
+    - npx allure generate allure-results --clean -o public
   artifacts:
     paths:
       - public

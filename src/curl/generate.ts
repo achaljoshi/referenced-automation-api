@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import type { CurlEntry, Directives } from './curlFile';
 import type { ParsedCurl } from './parseCurl';
+import { isTokenLikeSegment, maskPathTokens } from '../client/logging';
 
 export interface ParamRule {
   /** Matches the NAME of a header, query parameter, form field or JSON key. */
@@ -26,6 +27,12 @@ export interface GenerateOptions {
   keepAllHeaders?: boolean;
   /** Extra "this name holds a secret" rules. */
   params?: ParamRule[];
+  /**
+   * Where the Playwright project (the folder with playwright.config and the .env.<ENV> files) is, relative to the folder
+   * the spec is written to - e.g. `../..` for tests/generated. The test then reads the .env files from there, not from
+   * whatever directory the run started in. The CLI works it out; omit it to use the working directory.
+   */
+  projectDir?: string;
   /** One test with every command as a step, instead of one test per command. */
   singleFlow?: boolean;
   /** Title of the wrapping `test.describe`. Default: the source file name. */
@@ -48,9 +55,15 @@ export interface GeneratedTests {
   warnings: string[];
 }
 
-/** Header names that carry a credential. */
+/** Names (header, query, form field, JSON key, XML element) that carry a credential. */
 const SECRET_NAME =
-  /pass(word|wd|code)?|secret|token|api[-_]?key|apikey|credential|authorization|signature|^cookie$|session/i;
+  /pass(word|wd|code)?|pwd|secret|token|api[-_]?key|apikey|credential|authorization|signature|cookie|session/i;
+/** Short names that would match inside ordinary words (`shipping`, `spinner`, `hotplug`), so they must stand alone: `pin`, `user_pin`, `userPin`, `OTP`. */
+const SECRET_WORD = /(^|[^a-z])(pin|otp)([^a-z]|$)/i;
+
+function isSecretName(name: string): boolean {
+  return SECRET_NAME.test(name) || SECRET_WORD.test(name.replace(/([a-z0-9])([A-Z])/g, '$1_$2'));
+}
 /** Headers a browser or curl adds that say nothing about the API contract. */
 const NOISE_HEADER =
   /^(host|content-length|connection|accept-encoding|accept-language|cache-control|pragma|priority|upgrade-insecure-requests|dnt|te|sec-.*|user-agent|origin|referer)$/i;
@@ -193,7 +206,56 @@ function secretVar(ctx: Context, name: string): string | undefined {
   if (ctx.inlineSecrets) return undefined;
   const rule = ctx.rules.find((r) => r.pattern.test(name));
   if (rule) return rule.envVar;
-  return SECRET_NAME.test(name) ? envNameFor(name) : undefined;
+  return isSecretName(name) ? envNameFor(name) : undefined;
+}
+
+/**
+ * An XML body with the text of every credential-named element (`<Password>`, `<soap:Token>`, `<ClientSecret>`) and
+ * attribute (`pin="1234"`) replaced by an `{{env:...}}` placeholder, which the text expression then turns into an
+ * environment read. A value that is already a placeholder is left alone.
+ */
+function envifyXml(ctx: Context, xml: string): string {
+  if (ctx.inlineSecrets) return xml;
+  const placeholder = (name: string) => `{{env:${secretVar(ctx, name) ?? envNameFor(name)}}}`;
+  const isPlaceholder = (value: string) => /\$\{[A-Za-z_]|\{\{/.test(value);
+  return xml
+    .replace(
+      /(<((?:[\w.-]+:)?([\w.-]+))(?:\s[^<>]*)?>)([^<]+)(<\/\2\s*>)/g,
+      (match, open: string, _qualified: string, local: string, text: string, close: string) =>
+        secretVar(ctx, local) !== undefined && text.trim() !== '' && !isPlaceholder(text)
+          ? `${open}${placeholder(local)}${close}`
+          : match,
+    )
+    .replace(
+      /(\s)([\w.:-]+)(\s*=\s*)(["'])([^"']*)\4/g,
+      (match, space: string, name: string, eq: string, quote: string, value: string) => {
+        const local = name.split(':').pop() ?? name;
+        return secretVar(ctx, local) !== undefined && value !== '' && !isPlaceholder(value)
+          ? `${space}${name}${eq}${quote}${placeholder(local)}${quote}`
+          : match;
+      },
+    );
+}
+
+/** A URL path with every token-like segment (`/reset/9f8a...`, a JWT, `/token/<value>`) replaced by an `{{env:...}}` placeholder. */
+function envifyPath(ctx: Context, path: string): string {
+  if (ctx.inlineSecrets) return path;
+  const segments = path.split('/');
+  let counter = 0;
+  const out = segments.map((segment, index) => {
+    if (segment === '' || /\$\{[A-Za-z_]|\{\{|\{\w+\}/.test(segment)) return segment;
+    if (!isTokenLikeSegment(segment, segments[index - 1])) return segment;
+    counter++;
+    const base = segments[index - 1] && /^[A-Za-z][\w-]*$/.test(segments[index - 1] as string)
+      ? `${segments[index - 1]}_token`
+      : 'path_token';
+    const name = secretVar(ctx, base) ?? envNameFor(base);
+    ctx.warn(
+      `A URL path segment looks like a token and was not written into the test - set ${name}${counter > 1 ? ` (and the other path tokens)` : ''}`,
+    );
+    return `{{env:${name}${counter > 1 ? `_${counter}` : ''}}}`;
+  });
+  return out.join('/');
 }
 
 /**
@@ -300,7 +362,7 @@ function splitUrl(
   ctx: Context,
   parsed: ParsedCurl,
   keepHost: boolean,
-): { target: string; queryEntries: Array<[string, string | string[]]> } {
+): { target: string; absolute: boolean; queryEntries: Array<[string, string | string[]]> } {
   const raw = parsed.url;
   const startsWithVariable = /^\$\{[A-Za-z_]/.test(raw);
   let urlText = raw;
@@ -328,6 +390,9 @@ function splitUrl(
       }
     }
   }
+  // a token in the path is a secret too: keep it out of the file, read it from the environment
+  const hostPart = /^(https?:\/\/[^/]+)/i.exec(target)?.[1] ?? '';
+  target = hostPart + envifyPath(ctx, target.slice(hostPart.length));
   if (
     /\{[A-Za-z_]\w*\}/.test(target.replace(/\$\{[A-Za-z_]\w*\}/g, '').replace(/\{\{[^}]*\}\}/g, ''))
   ) {
@@ -356,7 +421,11 @@ function splitUrl(
     for (const [name, values] of grouped)
       queryEntries.push([name, values.length === 1 ? (values[0] as string) : values]);
   }
-  return { target, queryEntries };
+  return {
+    target,
+    absolute: startsWithVariable || /^https?:\/\//i.test(target),
+    queryEntries,
+  };
 }
 
 function contentTypeOf(parsed: ParsedCurl): string | undefined {
@@ -374,7 +443,7 @@ function buildRequest(
   const shellVars = parsed.variables;
   const authLines: string[] = [];
   const optionEntries: Array<[string, string]> = [];
-  const { target, queryEntries } = splitUrl(ctx, parsed, keepHost);
+  const { target, absolute, queryEntries } = splitUrl(ctx, parsed, keepHost);
 
   // ---- auth: turned into the framework's own providers, with the secret read from the environment ----
   const headers = [...parsed.headers];
@@ -475,7 +544,7 @@ function buildRequest(
       optionEntries.push(['json', jsonLiteral(ctx, parsedJson.value, shellVars, indent + 1)]);
       if (/^application\/json\s*(;.*)?$/i.test(type ?? '') || !type) dropContentType();
     } else if (typeLower.includes('xml')) {
-      optionEntries.push(['xml', textExpr(ctx, body, shellVars)]);
+      optionEntries.push(['xml', textExpr(ctx, envifyXml(ctx, body), shellVars)]);
       if (/^application\/xml\s*(;.*)?$/i.test(type ?? '')) dropContentType();
     } else if (
       typeLower.includes('x-www-form-urlencoded') ||
@@ -503,7 +572,11 @@ function buildRequest(
         dropContentType();
       }
     } else {
-      optionEntries.push(['rawBody', textExpr(ctx, body, shellVars)]);
+      const looksXml = /^\s*<[?!\w]/.test(body);
+      optionEntries.push([
+        'rawBody',
+        textExpr(ctx, looksXml ? envifyXml(ctx, body) : body, shellVars),
+      ]);
     }
   }
 
@@ -560,6 +633,8 @@ function buildRequest(
   if (parsed.timeoutSeconds !== undefined)
     ordered.push(['timeoutMs', String(Math.round(parsed.timeoutSeconds * 1000))]);
   if (!parsed.followRedirects && !options.followRedirects) ordered.push(['maxRedirects', '0']);
+  // the client refuses a full URL in place of a path unless the call says it is on purpose
+  if (absolute) ordered.push(['absoluteUrl', 'true']);
   if (parsed.insecure)
     ctx.warn(
       'curl -k (insecure TLS) is not applied per request: set IGNORE_HTTPS_ERRORS=true in the .env file for this environment, or pass ignoreHTTPSErrors',
@@ -686,7 +761,10 @@ function assertions(ctx: Context, directives: Directives, key: string): string[]
 
 function titleOf(entry: CurlEntry): string {
   if (entry.directives.name) return entry.directives.name;
-  const url = entry.parsed.url.replace(/^https?:\/\/[^/]+/i, '').replace(/\?.*$/, '') || '/';
+  // the title is written into the file, so a token in the path must not be in it
+  const url = maskPathTokens(
+    entry.parsed.url.replace(/^https?:\/\/[^/]+/i, '').replace(/\?.*$/, '') || '/',
+  );
   return `${entry.parsed.method} ${url}`;
 }
 
@@ -744,6 +822,10 @@ function constantsBlock(ctx: Context): string[] {
 
 /** `name: code,` where a multi-line code (an object) keeps its closing brace aligned. */
 function entryCode(name: string, code: string): string {
+  // a body that is one expression reading the environment (an XML text with a password in it) is a getter like the
+  // values inside an object: a missing variable names itself when the body is used, not when the file loads
+  if (code.includes('env.get(') && !/^[{[]/.test(code))
+    return `get ${name}() {\n  return ${code};\n},`;
   return `${name}: ${code},`;
 }
 
@@ -862,6 +944,8 @@ export function generateTests(entries: CurlEntry[], options: GenerateOptions): G
   const apiImport = options.apiImport ?? '@automation/referenced-automation-api';
   const imports: string[] = [];
   if (ctx.usesFs) imports.push("import * as fs from 'node:fs';");
+  if (ctx.usesEnv && options.projectDir)
+    imports.push("import * as nodePath from 'node:path';");
   if (ctx.usesEnv)
     imports.push("import { loadEnv } from '@automation/referenced-automation-utils';");
   const authClasses = [...ctx.authClasses].sort();
@@ -881,7 +965,8 @@ export function generateTests(entries: CurlEntry[], options: GenerateOptions): G
     '// Edit freely - or keep the curl file as the source of truth and regenerate to a new file.',
     ...(ctx.envVars.size > 0
       ? [
-          `// Secrets are never written into the test; set these environment variables (e.g. in .env.<ENV>.local): ${[...ctx.envVars].sort().join(', ')}`,
+          `// Values recognised as secrets are read from the environment, not written into this file; set (e.g. in .env.<ENV>.local): ${[...ctx.envVars].sort().join(', ')}`,
+          '// Anything the converter did not recognise as a secret is written as it was in the curl command: review this file before committing it.',
         ]
       : []),
   ];
@@ -895,7 +980,14 @@ export function generateTests(entries: CurlEntry[], options: GenerateOptions): G
     ...header,
     ...imports,
     '',
-    ...(ctx.usesEnv ? ['const env = loadEnv();', ''] : []),
+    ...(ctx.usesEnv
+      ? [
+          options.projectDir
+            ? `const env = loadEnv({ dir: nodePath.resolve(__dirname, ${quote(options.projectDir)}) });`
+            : 'const env = loadEnv();',
+          '',
+        ]
+      : []),
     ...constantsBlock(ctx),
     ...endpointsBlock(ctx),
     `test.describe(${quote(title)}, () => {`,

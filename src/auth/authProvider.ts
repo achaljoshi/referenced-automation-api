@@ -9,10 +9,133 @@ export interface AuthTarget {
   method?: string;
   path?: string;
   body?: string;
+  /** How a provider that has to call an identity provider (token, login) makes that call. Set by ApiClient: the call goes through the client's own connection (proxy, TLS, timeout) and shows in its exchange log. */
+  transport?: AuthTransport;
 }
 
 export interface AuthProvider {
   apply(target: AuthTarget): Promise<void> | void;
+  /**
+   * Called by ApiClient when a request answered 401. Drop whatever credential was cached and return true if a fresh one
+   * could help; the client then re-applies the provider and sends the request once more (once per request).
+   */
+  reauthenticate?(): Promise<boolean> | boolean;
+}
+
+/** A POST to an identity provider: a form (or JSON) body, no redirects followed unless asked. */
+export interface AuthRequest {
+  url: string;
+  form?: Record<string, string>;
+  json?: unknown;
+  timeoutMs: number;
+  followRedirects?: boolean;
+}
+
+export interface AuthReply {
+  status: number;
+  /** Lower-case names. */
+  headers: Record<string, string>;
+  /** Every Set-Cookie, one entry each. */
+  setCookies: string[];
+  text: string;
+}
+
+export interface AuthTransport {
+  post(request: AuthRequest): Promise<AuthReply>;
+}
+
+const DEFAULT_AUTH_TIMEOUT_MS = 30_000;
+
+/**
+ * What a provider uses when it is called outside an ApiClient (no `target.transport`): the global `fetch`, with a
+ * timeout. It does not know the project's proxy or TLS settings - inside an ApiClient the call goes through the
+ * client's connection instead.
+ */
+const fetchTransport: AuthTransport = {
+  async post(request) {
+    const where = (() => {
+      try {
+        const url = new URL(request.url);
+        return `${url.origin}${url.pathname}`;
+      } catch {
+        return 'the identity provider';
+      }
+    })();
+    let response: Response;
+    try {
+      response = await fetch(request.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': request.form ? 'application/x-www-form-urlencoded' : 'application/json',
+        },
+        body: request.form
+          ? new URLSearchParams(request.form).toString()
+          : JSON.stringify(request.json),
+        redirect: request.followRedirects === false ? 'manual' : 'follow',
+        signal: AbortSignal.timeout(request.timeoutMs),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'TimeoutError')
+        throw new Error(`Request to ${where} timed out after ${request.timeoutMs}ms`);
+      throw new Error(
+        `Request to ${where} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return {
+      status: response.status,
+      headers: Object.fromEntries(response.headers.entries()),
+      setCookies: response.headers.getSetCookie(),
+      text: await response.text(),
+    };
+  },
+};
+
+function transportOf(target: AuthTarget): AuthTransport {
+  return target.transport ?? fetchTransport;
+}
+
+/** `text` with every secret value in it masked. */
+function scrub(text: string, secrets: Array<string | undefined>): string {
+  let out = text;
+  for (const secret of secrets) if (secret) out = out.split(secret).join('[REDACTED]');
+  return out;
+}
+
+/**
+ * A failure message that never echoes the identity provider's body: only the standard OAuth `error` and
+ * `error_description`, cut short, with the credentials we sent masked in case the provider repeats them.
+ */
+function failure(what: string, reply: AuthReply, secrets: Array<string | undefined>): Error {
+  let detail = '';
+  try {
+    const json = JSON.parse(reply.text) as { error?: unknown; error_description?: unknown };
+    detail = [json.error, json.error_description]
+      .filter((part): part is string => typeof part === 'string')
+      .join(': ');
+  } catch {
+    // not JSON: say nothing about the body
+  }
+  detail = scrub(detail, secrets).slice(0, 200);
+  return new Error(`${what} failed: ${reply.status}${detail ? ` (${detail})` : ''}`);
+}
+
+interface TokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
+function readToken(what: string, reply: AuthReply, secrets: Array<string | undefined>): TokenResponse {
+  if (reply.status < 200 || reply.status > 299) throw failure(what, reply, secrets);
+  let json: Partial<TokenResponse> | undefined;
+  try {
+    json = JSON.parse(reply.text) as Partial<TokenResponse>;
+  } catch {
+    throw new Error(`${what} answered ${reply.status} but not with JSON`);
+  }
+  if (typeof json?.access_token !== 'string' || json.access_token === '')
+    throw new Error(`${what} answered ${reply.status} without an access_token`);
+  return json as TokenResponse;
 }
 
 export class BasicAuth implements AuthProvider {
@@ -61,6 +184,8 @@ export interface OAuth2ClientCredentialsOptions {
   scope?: string;
   /** How early to refresh before expiry, in seconds. Default 30. */
   refreshSkewSeconds?: number;
+  /** Give up on the token request after this long. Default 30 s. */
+  timeoutMs?: number;
 }
 
 /**
@@ -71,40 +196,41 @@ export interface OAuth2ClientCredentialsOptions {
 export class OAuth2ClientCredentials implements AuthProvider {
   private cachedToken?: string;
   private expiresAtMs = 0;
+  private inflight?: Promise<string>;
 
   constructor(private readonly options: OAuth2ClientCredentialsOptions) {}
 
   async apply(target: AuthTarget): Promise<void> {
-    const token = await this.getToken();
+    const token = await this.getToken(target);
     target.headers.Authorization = `Bearer ${token}`;
   }
 
-  private async getToken(): Promise<string> {
+  /** One token request at a time: calls that arrive while it is out wait for it instead of each fetching their own. */
+  private getToken(target: AuthTarget): Promise<string> {
     const skewMs = (this.options.refreshSkewSeconds ?? 30) * 1000;
     if (this.cachedToken && Date.now() < this.expiresAtMs - skewMs) {
-      return this.cachedToken;
+      return Promise.resolve(this.cachedToken);
     }
-
-    const body = new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: this.options.clientId,
-      client_secret: this.options.clientSecret,
-      ...(this.options.scope ? { scope: this.options.scope } : {}),
+    this.inflight ??= this.fetchToken(target).finally(() => {
+      this.inflight = undefined;
     });
+    return this.inflight;
+  }
 
-    const response = await fetch(this.options.tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
+  private async fetchToken(target: AuthTarget): Promise<string> {
+    const reply = await transportOf(target).post({
+      url: this.options.tokenUrl,
+      form: {
+        grant_type: 'client_credentials',
+        client_id: this.options.clientId,
+        client_secret: this.options.clientSecret,
+        ...(this.options.scope ? { scope: this.options.scope } : {}),
+      },
+      timeoutMs: this.options.timeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS,
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `OAuth2 client-credentials token request failed: ${response.status} ${await response.text()}`,
-      );
-    }
-
-    const json = (await response.json()) as { access_token: string; expires_in?: number };
+    const json = readToken('OAuth2 client-credentials token request', reply, [
+      this.options.clientSecret,
+    ]);
     this.cachedToken = json.access_token;
     this.expiresAtMs = Date.now() + (json.expires_in ?? 3600) * 1000;
     return this.cachedToken;
@@ -133,6 +259,8 @@ export interface OAuth2PasswordOptions {
   scope?: string;
   /** How early to refresh before expiry, in seconds. Default 30. */
   refreshSkewSeconds?: number;
+  /** Give up on a token request after this long. Default 30 s. */
+  timeoutMs?: number;
 }
 
 /**
@@ -144,19 +272,32 @@ export class OAuth2PasswordAuth implements AuthProvider {
   private accessToken?: string;
   private refreshToken?: string;
   private expiresAtMs = 0;
+  private inflight?: Promise<string>;
 
   constructor(private readonly options: OAuth2PasswordOptions) {}
 
   async apply(target: AuthTarget): Promise<void> {
-    target.headers.Authorization = `Bearer ${await this.token()}`;
+    target.headers.Authorization = `Bearer ${await this.token(target)}`;
   }
 
-  private async token(): Promise<string> {
+  /**
+   * One refresh/login at a time: a refresh token is usually single-use (rotation), so two parallel requests that each
+   * tried to use it would make the second one fail and fall back to a full login.
+   */
+  private token(target: AuthTarget): Promise<string> {
     const skewMs = (this.options.refreshSkewSeconds ?? 30) * 1000;
-    if (this.accessToken && Date.now() < this.expiresAtMs - skewMs) return this.accessToken;
+    if (this.accessToken && Date.now() < this.expiresAtMs - skewMs)
+      return Promise.resolve(this.accessToken);
+    this.inflight ??= this.renew(target).finally(() => {
+      this.inflight = undefined;
+    });
+    return this.inflight;
+  }
+
+  private async renew(target: AuthTarget): Promise<string> {
     if (this.refreshToken) {
       try {
-        return await this.fetchToken({
+        return await this.fetchToken(target, {
           grant_type: 'refresh_token',
           refresh_token: this.refreshToken,
         });
@@ -164,34 +305,29 @@ export class OAuth2PasswordAuth implements AuthProvider {
         this.refreshToken = undefined; // expired or revoked: log in again below
       }
     }
-    return this.fetchToken({
+    return this.fetchToken(target, {
       grant_type: 'password',
       username: this.options.username,
       password: this.options.password,
     });
   }
 
-  private async fetchToken(grant: Record<string, string>): Promise<string> {
-    const body = new URLSearchParams({
-      ...grant,
-      ...(this.options.clientId ? { client_id: this.options.clientId } : {}),
-      ...(this.options.clientSecret ? { client_secret: this.options.clientSecret } : {}),
-      ...(this.options.scope ? { scope: this.options.scope } : {}),
+  private async fetchToken(target: AuthTarget, grant: Record<string, string>): Promise<string> {
+    const reply = await transportOf(target).post({
+      url: this.options.tokenUrl,
+      form: {
+        ...grant,
+        ...(this.options.clientId ? { client_id: this.options.clientId } : {}),
+        ...(this.options.clientSecret ? { client_secret: this.options.clientSecret } : {}),
+        ...(this.options.scope ? { scope: this.options.scope } : {}),
+      },
+      timeoutMs: this.options.timeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS,
     });
-    const response = await fetch(this.options.tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-    });
-    if (!response.ok)
-      throw new Error(
-        `OAuth2 ${grant.grant_type} grant failed: ${response.status} ${await response.text()}`,
-      );
-    const json = (await response.json()) as {
-      access_token: string;
-      refresh_token?: string;
-      expires_in?: number;
-    };
+    const json = readToken(`OAuth2 ${grant.grant_type} grant`, reply, [
+      this.options.password,
+      this.options.clientSecret,
+      grant.refresh_token,
+    ]);
     this.accessToken = json.access_token;
     this.refreshToken = json.refresh_token ?? this.refreshToken;
     this.expiresAtMs = Date.now() + (json.expires_in ?? 3600) * 1000;
@@ -296,35 +432,46 @@ export interface SessionCookieAuthOptions {
   /** Sent as JSON, or as a form when `asForm`. */
   credentials: Record<string, string>;
   asForm?: boolean;
+  /** Give up on the login after this long. Default 30 s. */
+  timeoutMs?: number;
 }
 
-/** Logs in once (a POST that answers with Set-Cookie) and sends that session cookie on every request after - for APIs behind a login form rather than a token. */
+/**
+ * Logs in once (a POST that answers with Set-Cookie) and sends that session cookie on every request after - for APIs
+ * behind a login form rather than a token. Parallel first requests share one login, and a request answered 401 (the
+ * session expired) logs in again and is sent once more.
+ */
 export class SessionCookieAuth implements AuthProvider {
   private cookie?: string;
+  private inflight?: Promise<string>;
 
   constructor(private readonly options: SessionCookieAuthOptions) {}
 
   async apply(target: AuthTarget): Promise<void> {
-    if (!this.cookie) this.cookie = await this.login();
+    if (!this.cookie) {
+      this.inflight ??= this.login(target).finally(() => {
+        this.inflight = undefined;
+      });
+      this.cookie = await this.inflight;
+    }
     target.headers.Cookie = this.cookie;
   }
 
-  private async login(): Promise<string> {
-    const response = await fetch(this.options.loginUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': this.options.asForm
-          ? 'application/x-www-form-urlencoded'
-          : 'application/json',
-      },
-      body: this.options.asForm
-        ? new URLSearchParams(this.options.credentials).toString()
-        : JSON.stringify(this.options.credentials),
-      redirect: 'manual',
+  reauthenticate(): boolean {
+    this.cookie = undefined;
+    return true;
+  }
+
+  private async login(target: AuthTarget): Promise<string> {
+    const reply = await transportOf(target).post({
+      url: this.options.loginUrl,
+      ...(this.options.asForm ? { form: this.options.credentials } : { json: this.options.credentials }),
+      timeoutMs: this.options.timeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS,
+      followRedirects: false,
     });
-    if (response.status >= 400)
-      throw new Error(`Session login failed: ${response.status} ${await response.text()}`);
-    const cookies = response.headers.getSetCookie().map((c) => c.split(';')[0]);
+    if (reply.status >= 400)
+      throw failure('Session login', reply, Object.values(this.options.credentials));
+    const cookies = reply.setCookies.map((c) => c.split(';')[0]);
     if (cookies.length === 0)
       throw new Error('Session login succeeded but the server sent no Set-Cookie');
     return cookies.join('; ');

@@ -50,3 +50,6 @@ out/
 
 # Tests generated from Gherkin features by bddgen
 .features-gen/
+
+# fortnightly audit output (keep it between audits; see referenced-automation-utils docs/governance/AUDIT.md)
+audit-reports/

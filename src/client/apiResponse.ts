@@ -226,12 +226,31 @@ export class ApiResponse {
     return this;
   }
 
-  /** A GraphQL response with no `errors` array (GraphQL answers 200 even when the query failed). */
+  /**
+   * A GraphQL response with no `errors` (GraphQL answers 200 even when the query failed). It must also BE a GraphQL
+   * response: a JSON body with `data` or `errors` - an HTML 502 page or an empty body fails instead of passing.
+   */
   expectNoGraphqlErrors(): this {
+    const contentType = this.header('content-type') ?? '';
+    const body = this.parsedBody;
+    if (
+      !contentType.toLowerCase().includes('json') ||
+      body === null ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      !('data' in body || 'errors' in body)
+    )
+      throw new Error(
+        `Expected a GraphQL JSON response (with "data" or "errors") but got status ${this.status()}, Content-Type "${contentType}"\nBody: ${this.rawText.slice(0, 300)}`,
+      );
     const errors = this.get<unknown[] | undefined>('errors');
     if (Array.isArray(errors) && errors.length > 0)
       throw new Error(
         `GraphQL returned ${errors.length} error(s): ${JSON.stringify(errors).slice(0, 1000)}`,
+      );
+    if ((body as { data?: unknown }).data === null || (body as { data?: unknown }).data === undefined)
+      throw new Error(
+        `GraphQL returned no "data" and no errors: ${this.rawText.slice(0, 300)}`,
       );
     return this;
   }

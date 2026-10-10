@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { convertCurl, parseCurl, parseCurlFile, splitCommands, tokenize } from '../src/curl';
 import { toCurl } from '../src/curl/toCurl';
+import { runPlaywright } from './support/runPlaywright';
 
 const squash = (code: string) => code.replace(/[\s,]+/g, '');
 
@@ -651,5 +652,219 @@ test.describe('api-curl-to-playwright command', () => {
     expect(run(['/no/such/file.curl']).status).toBe(1);
     expect(run(['--help']).stdout).toContain('api-curl-to-playwright');
     expect(run(['-', '--stdout'], '# nothing\n').stderr).toContain('No curl commands found');
+  });
+});
+
+test.describe('more secrets are kept out of the generated file @regression', () => {
+  const convert = (text: string, options: Partial<Parameters<typeof convertCurl>[1]> = {}) =>
+    convertCurl(text, { source: 'x.curl', inline: true, ...options });
+
+  test('pwd, passwd, pin, otp, client_secret, x-api-key and cookie values come from the environment', () => {
+    const secrets = ['pwd-1', 'passwd-2', '4321', '998877', 'cs-secret-3', 'xk-4', 'theme=secret-5', 'creds-6'];
+    const { code, envVars } = convert(
+      [
+        `curl https://api.test/a -d '{"pwd":"pwd-1","passwd":"passwd-2","pin":"4321","user_otp":"998877","credential":"creds-6","shipping":"keep-me"}' -H 'Content-Type: application/json'`,
+        `curl https://api.test/b -d 'client_secret=cs-secret-3&otp=998877&mapping=keep-me-too'`,
+        `curl https://api.test/c -H 'X-Api-Key: xk-4' -H 'Set-Cookie: theme=secret-5' -H 'X-Pin: 4321'`,
+      ].join('\n'),
+    );
+    for (const secret of secrets) expect(code, `leaked ${secret}`).not.toContain(secret);
+    expect(code).toContain("pwd: env.get('API_PWD')");
+    expect(code).toContain("passwd: env.get('API_PASSWD')");
+    expect(code).toContain("pin: env.get('API_PIN')");
+    expect(code).toContain("user_otp: env.get('API_USER_OTP')");
+    expect(code).toContain("client_secret: env.get('API_CLIENT_SECRET')");
+    expect(code).toContain("'Set-Cookie': env.get('API_SET_COOKIE')");
+    // ordinary names that merely contain "pin" are not secrets
+    expect(code).toContain("shipping: 'keep-me'");
+    expect(code).toContain("mapping: 'keep-me-too'");
+    expect(envVars).toEqual(expect.arrayContaining(['API_PWD', 'API_PIN', 'API_USER_OTP', 'API_CLIENT_SECRET']));
+  });
+
+  test('XML bodies: the text of <Password>, <Secret> and <Token> elements (prefixed too) and secret attributes', () => {
+    const body =
+      '<soap:Envelope><soap:Body><Login><User>ada</User><Password>xml-pass-1</Password><ns:ClientSecret>xml-secret-2</ns:ClientSecret><Token>xml-token-3</Token><Card pin="7788">x</Card></Login></soap:Body></soap:Envelope>';
+    const { code, envVars } = convert(
+      `curl https://api.test/soap -H 'Content-Type: text/xml' -d '${body}'`,
+      { inline: false },
+    );
+    for (const secret of ['xml-pass-1', 'xml-secret-2', 'xml-token-3', '7788'])
+      expect(code, `leaked ${secret}`).not.toContain(secret);
+    expect(code).toContain("<User>ada</User>"); // not a secret: kept as it was
+    expect(code).toContain("${env.get('API_PASSWORD')}");
+    expect(code).toContain("${env.get('API_CLIENT_SECRET')}");
+    expect(code).toContain("${env.get('API_TOKEN')}");
+    expect(code).toContain("${env.get('API_PIN')}");
+    expect(envVars).toEqual(expect.arrayContaining(['API_PASSWORD', 'API_CLIENT_SECRET', 'API_TOKEN', 'API_PIN']));
+    // as a getter in CONSTANTS, like every other value that reads the environment
+    expect(code).toMatch(/get \w+\(\) \{\n\s+return `<soap:Envelope>/);
+  });
+
+  test('a raw body that looks like XML is treated the same; `# secret: inline` keeps it as written', () => {
+    expect(convert(`curl https://api.test/x -d '<a><Password>p4ss</Password></a>'`).code).not.toContain('p4ss');
+    expect(
+      convert(`# secret: inline\ncurl https://api.test/x -H 'Content-Type: text/xml' -d '<a><Password>p4ss</Password></a>'`).code,
+    ).toContain('p4ss');
+  });
+
+  test('a token in the URL path is read from the environment', () => {
+    const token = '9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a';
+    const { code, envVars, warnings } = convert(
+      [
+        `curl https://api.test/reset/${token}`,
+        `curl https://api.test/users/42/orders/7`, // plain ids stay
+        `curl https://api.test/session/token/abc1234567/x`,
+      ].join('\n'),
+    );
+    expect(code).not.toContain(token);
+    expect(code).not.toContain('abc1234567');
+    expect(code).toContain("`/reset/${env.get('API_RESET_TOKEN')}`");
+    expect(code).toContain("`/session/token/${env.get('API_TOKEN_TOKEN')}/x`");
+    expect(code).toContain("'/users/42/orders/7'");
+    expect(envVars).toEqual(expect.arrayContaining(['API_RESET_TOKEN']));
+    expect(warnings.join('\n')).toMatch(/URL path segment looks like a token/);
+  });
+
+  test('a full URL (several hosts, or --keep-host) is sent with absoluteUrl: true, as the client now requires', () => {
+    const { code } = convert(`curl https://one.test/a\ncurl https://two.test/b`);
+    expect(code).toMatch(/apiClient\.get\('https:\/\/one\.test\/a', \{[^}]*absoluteUrl: true/);
+    expect(convert(`curl https://one.test/a`, { keepHost: true }).code).toContain('absoluteUrl: true');
+    expect(convert(`curl https://one.test/a`).code).not.toContain('absoluteUrl');
+  });
+
+  test('the generated header says what is true: recognised secrets are read from the environment, the rest is written', () => {
+    const { code } = convert(`curl https://api.test/a -H 'Authorization: Bearer abc'`);
+    expect(code).toContain('Values recognised as secrets are read from the environment');
+    expect(code).toContain('review this file before committing it');
+    expect(code).not.toContain('Secrets are never written');
+  });
+
+  test('a project folder is read from the .env next to the Playwright config when the converter knows where it is', () => {
+    const { code } = convert(`curl https://api.test/a -H 'Authorization: Bearer abc'`, { projectDir: '../..' });
+    expect(code).toContain("import * as nodePath from 'node:path';");
+    expect(code).toContain("const env = loadEnv({ dir: nodePath.resolve(__dirname, '../..') });");
+    expect(convert(`curl https://api.test/a -H 'Authorization: Bearer abc'`).code).toContain('const env = loadEnv();');
+  });
+});
+
+test.describe('the command does not overwrite a file unless told to @regression', () => {
+  const cli = path.join(__dirname, '..', 'dist', 'cli', 'curlToTests.js');
+  const run = (args: string[]) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
+
+  test('an existing spec is refused (exit 1, a clear message, file untouched) until --force', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curl-force-'));
+    const input = path.join(dir, 'a.curl');
+    fs.writeFileSync(input, 'curl https://api.test/a\n');
+    const out = path.join(dir, 'out');
+    expect(run([input, '--out', out]).status).toBe(0);
+    const target = path.join(out, 'a.spec.ts');
+    fs.writeFileSync(target, '// my edits\n');
+
+    const refused = run([input, '--out', out]);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('Not overwriting');
+    expect(refused.stderr).toContain('--force');
+    expect(fs.readFileSync(target, 'utf8')).toBe('// my edits\n');
+
+    const forced = run([input, '--out', out, '--force']);
+    expect(forced.status).toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toContain("test('GET /a @api'");
+  });
+
+  test('with several inputs nothing is written if any target exists', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curl-force-'));
+    fs.writeFileSync(path.join(dir, 'a.curl'), 'curl https://api.test/a\n');
+    fs.writeFileSync(path.join(dir, 'b.curl'), 'curl https://api.test/b\n');
+    const out = path.join(dir, 'out');
+    fs.mkdirSync(out);
+    fs.writeFileSync(path.join(out, 'b.spec.ts'), '// mine\n');
+    const result = run([dir, '--out', out]);
+    expect(result.status).toBe(1);
+    expect(fs.readdirSync(out)).toEqual(['b.spec.ts']);
+  });
+
+  test('the written spec reads .env from the Playwright project it is inside of', ({}, testInfo) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curl-proj-'));
+    const input = path.join(dir, 'a.curl');
+    fs.writeFileSync(input, "curl https://api.test/a -H 'Authorization: Bearer abc'\n");
+    const out = testInfo.outputPath('generated'); // under test-results/, inside this repo (which has a playwright.config.ts)
+    expect(run([input, '--out', out]).status).toBe(0);
+    const generated = fs.readFileSync(path.join(out, 'a.spec.ts'), 'utf8');
+    const expected = path.relative(out, path.join(__dirname, '..')).split(path.sep).join('/');
+    expect(generated).toContain(`nodePath.resolve(__dirname, '${expected}')`);
+    // outside any project there is nothing to point at: plain loadEnv()
+    const elsewhere = path.join(dir, 'out');
+    expect(run([input, '--out', elsewhere]).status).toBe(0);
+    expect(fs.readFileSync(path.join(elsewhere, 'a.spec.ts'), 'utf8')).toContain('const env = loadEnv();');
+  });
+});
+
+test.describe('generated code is EXECUTED, not just read @regression', () => {
+  // Converts a curl file, writes the spec into this test's folder, and runs it in a separate Playwright process against
+  // the in-process server, with the secrets supplied ONLY through environment variables.
+  const root = path.join(__dirname, '..');
+  const base = path.join(__dirname, 'support', 'generatedTest');
+  const apiIndex = path.join(root, 'src', 'index');
+
+  function runGenerated(dir: string, curl: string, env: Record<string, string>) {
+    const generated = convertCurl(curl, { source: 'secrets.curl', testImport: base, apiImport: apiIndex });
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'secrets.spec.ts'), generated.code);
+    fs.writeFileSync(
+      path.join(dir, 'playwright.config.js'),
+      "module.exports = { testDir: __dirname, testMatch: '*.spec.ts', workers: 1, retries: 0, outputDir: require('node:path').join(__dirname, 'inner-results') };\n",
+    );
+    return { generated, run: runPlaywright(path.join(dir, 'playwright.config.js'), { cwd: dir, env }) };
+  }
+
+  test('secrets in JSON, XML, headers, cookies and the URL path are sent from the environment and the checks pass', ({}, testInfo) => {
+    const token = '9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a';
+    const curl = [
+      `# name: JSON secrets`,
+      `# expect: 201`,
+      `# expect-json: pwd = json-pwd-value`,
+      `# expect-json: pin = p4321z`,
+      `curl -X POST http://x.test/users -H 'Content-Type: application/json' -d '{"name":"Ada","pwd":"json-pwd-value","pin":"p4321z","otp":"998877"}'`,
+      ``,
+      `# name: XML secret`,
+      `# expect-body-contains: xml-pass-value`,
+      `curl -X POST http://x.test/xml-echo -H 'Content-Type: application/xml' -d '<Login><User>ada</User><Password>xml-pass-value</Password></Login>'`,
+      ``,
+      `# name: header and cookie secrets`,
+      `# expect-json: headers.x-otp = otp-header-value`,
+      `# expect-json: headers.cookie = theme=cookie-secret-value`,
+      `curl http://x.test/headers-echo -H 'X-Otp: otp-header-value' -H 'Cookie: theme=cookie-secret-value'`,
+      ``,
+      `# name: path token`,
+      `# expect-json: reset = true`,
+      `curl http://x.test/reset/${token}`,
+    ].join('\n');
+    const { generated, run } = runGenerated(testInfo.outputPath('generated'), curl, {
+      API_PWD: 'json-pwd-value',
+      API_PIN: 'p4321z',
+      API_OTP: '998877',
+      API_PASSWORD: 'xml-pass-value',
+      API_X_OTP: 'otp-header-value',
+      API_COOKIE: 'theme=cookie-secret-value',
+      API_RESET_TOKEN: token,
+    });
+    // what the file SENDS: everything except the expected values the curl file's own "# expect-" lines wrote
+    const sent = generated.code.replace(/\/\/ what each command checks[\s\S]*?\n {2}\},\n/, '');
+    for (const secret of ['json-pwd-value', 'p4321z', '998877', 'xml-pass-value', 'otp-header-value', 'cookie-secret-value', token])
+      expect(sent, `leaked ${secret}`).not.toContain(secret);
+    expect({ passed: run.passed, failed: run.failed }, run.summary).toEqual({
+      passed: 4,
+      failed: 0,
+    });
+  });
+
+  test('a secret that is not provided fails the generated test naming the variable (the getter reads it when used)', ({}, testInfo) => {
+    const { run } = runGenerated(
+      testInfo.outputPath('generated'),
+      `curl -X POST http://x.test/users -H 'Content-Type: application/json' -d '{"pwd":"p"}'`,
+      { API_PWD: undefined as unknown as string },
+    );
+    expect(run.failed).toBe(1);
+    expect(run.stdout).toContain('API_PWD');
   });
 });

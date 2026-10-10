@@ -33,10 +33,23 @@ function asText(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
+function typeName(value: unknown): string {
+  return value === null ? 'null' : Array.isArray(value) ? 'an array' : `a ${typeof value}`;
+}
+
 function table(data: TableLike, vars: Vars): Record<string, string> {
   return Object.fromEntries(
     Object.entries(data.rowsHash()).map(([key, value]) => [key, vars.interpolate(value)]),
   );
+}
+
+/**
+ * A step that names a full URL ("GET ... to "http://other-host/x"") is the author calling another system on purpose, so
+ * the client's refusal of absolute URLs (which protects code that builds a path from data) is lifted for it.
+ */
+function target(vars: Vars, path: string): { path: string; absoluteUrl?: boolean } {
+  const resolved = vars.interpolate(path);
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(resolved) ? { path: resolved, absoluteUrl: true } : { path: resolved };
 }
 
 async function send(
@@ -47,7 +60,9 @@ async function send(
 ): Promise<ApiResponse> {
   const query = { ...apiScenario.pendingQuery, ...extra.queryParams };
   apiScenario.pendingQuery = {};
-  const response = await apiClient.request(method(verb), vars.interpolate(path), {
+  const where = target(vars, path);
+  const response = await apiClient.request(method(verb), where.path, {
+    ...(where.absoluteUrl ? { absoluteUrl: true } : {}),
     ...extra,
     ...(Object.keys(query).length > 0 ? { queryParams: query } : {}),
   });
@@ -242,7 +257,9 @@ export function registerApiSteps({ Given, When, Then }: BddSteps): void {
       expected: string,
       seconds: number,
     ) => {
-      apiScenario.lastResponse = await apiClient.poll(method(verb), vars.interpolate(path), {
+      const where = target(vars, path);
+      apiScenario.lastResponse = await apiClient.poll(method(verb), where.path, {
+        ...(where.absoluteUrl ? { absoluteUrl: true } : {}),
         until: (response) => asText(response.get(field)) === vars.interpolate(expected),
         timeoutMs: seconds * 1000,
         description: `"${field}" to equal "${expected}"`,
@@ -314,15 +331,42 @@ export function registerApiSteps({ Given, When, Then }: BddSteps): void {
     },
   );
 
+  // Typed equality: a JSON string equals a quoted text, a JSON number equals a bare number. The number 1 is not the
+  // string "1" and true is not "true" - say `as text` when the text form is what you mean.
   Then(
     'the response field {string} equals {string}',
+    ({ apiScenario, vars }: ApiStepFixtures, field: string, expected: string) => {
+      const response = apiScenario.response();
+      const actual = response.require(field);
+      const wanted = vars.interpolate(expected);
+      if (actual !== wanted)
+        throw new Error(
+          `Expected "${field}" to be the text ${JSON.stringify(wanted)} but got ${typeName(actual)} ${JSON.stringify(actual)} (use 'equals ${JSON.stringify(wanted)} as text' to compare the text form, or 'equals <number>' for a number)\nBody: ${response.text().slice(0, 500)}`,
+        );
+    },
+  );
+
+  Then(
+    'the response field {string} equals {string} as text',
     ({ apiScenario, vars }: ApiStepFixtures, field: string, expected: string) => {
       const response = apiScenario.response();
       const actual = asText(response.require(field));
       const wanted = vars.interpolate(expected);
       if (actual !== wanted)
         throw new Error(
-          `Expected "${field}" to be ${JSON.stringify(wanted)} but got ${JSON.stringify(actual)}\nBody: ${response.text().slice(0, 500)}`,
+          `Expected "${field}" to read ${JSON.stringify(wanted)} as text but got ${JSON.stringify(actual)}\nBody: ${response.text().slice(0, 500)}`,
+        );
+    },
+  );
+
+  Then(
+    'the response field {string} equals {float}',
+    ({ apiScenario }: ApiStepFixtures, field: string, expected: number) => {
+      const response = apiScenario.response();
+      const actual = response.require(field);
+      if (actual !== expected)
+        throw new Error(
+          `Expected "${field}" to be the number ${expected} but got ${typeName(actual)} ${JSON.stringify(actual)}\nBody: ${response.text().slice(0, 500)}`,
         );
     },
   );
@@ -342,11 +386,18 @@ export function registerApiSteps({ Given, When, Then }: BddSteps): void {
     },
   );
 
+  // "Empty" is null, "", [] and {}. A number (0 included) or a boolean (false included) is a value, not emptiness:
+  // assert those with `equals 0` / `is false`.
   Then(
     'the response field {string} is not empty',
     ({ apiScenario }: ApiStepFixtures, field: string) => {
       const actual = apiScenario.response().require(field);
-      if (actual === null || actual === '' || (Array.isArray(actual) && actual.length === 0))
+      if (
+        actual === null ||
+        actual === '' ||
+        (Array.isArray(actual) && actual.length === 0) ||
+        (typeof actual === 'object' && !Array.isArray(actual) && Object.keys(actual).length === 0)
+      )
         throw new Error(`Expected "${field}" not to be empty but it is ${JSON.stringify(actual)}`);
     },
   );

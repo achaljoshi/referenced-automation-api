@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response } from 'express';
 import type { Server } from 'node:http';
+import type { Socket } from 'node:net';
 import { logger } from '@automation/referenced-automation-utils';
 import type { MockBody, MockBodyFn, MockRequestInfo, MockRouteDefinition, MockRouteOptions } from './types';
 
@@ -27,6 +28,18 @@ function send(res: Response, status: number, headers: Record<string, string> | u
   }
 }
 
+/** A handler that throws (or rejects) answers 500 with the message instead of leaving the request hanging - Express 4 does not catch async errors. */
+function guarded(handler: (req: Request, res: Response) => Promise<void>) {
+  return (req: Request, res: Response): void => {
+    handler(req, res).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`[MockServer] ${req.method} ${req.path} handler threw: ${message}`);
+      if (res.headersSent) res.end();
+      else res.status(500).json({ error: `Mock handler threw: ${message}` });
+    });
+  };
+}
+
 type ExpressMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options';
 
 /**
@@ -51,6 +64,7 @@ export class MockServer {
   private router = express.Router();
   private readonly app: Express = express();
   private server?: Server;
+  private readonly sockets = new Set<Socket>();
   baseUrl = '';
 
   constructor() {
@@ -65,14 +79,17 @@ export class MockServer {
   }
 
   private register(method: ExpressMethod, path: string, body: MockBody, options: MockRouteOptions = {}): this {
-    this.router[method](path, async (req: Request, res: Response) => {
-      const info = toMockRequestInfo(req);
-      const resolvedBody = typeof body === 'function' ? await (body as (req: MockRequestInfo) => unknown)(info) : body;
-      if (options.delayMs) await sleep(options.delayMs);
-      const status = options.status ?? 200;
-      logger.info(`[MockServer] ${req.method} ${req.path} -> ${status}`);
-      send(res, status, options.headers, resolvedBody);
-    });
+    this.router[method](
+      path,
+      guarded(async (req, res) => {
+        const info = toMockRequestInfo(req);
+        const resolvedBody = typeof body === 'function' ? await (body as (req: MockRequestInfo) => unknown)(info) : body;
+        if (options.delayMs) await sleep(options.delayMs);
+        const status = options.status ?? 200;
+        logger.info(`[MockServer] ${req.method} ${req.path} -> ${status}`);
+        send(res, status, options.headers, resolvedBody);
+      }),
+    );
     return this;
   }
 
@@ -109,14 +126,17 @@ export class MockServer {
   /** Full control: compute status/headers/body together, e.g. to vary the status by request body. */
   route(definition: MockRouteDefinition): this {
     const method = definition.method.toLowerCase() as ExpressMethod;
-    this.router[method](definition.path, async (req: Request, res: Response) => {
-      const info = toMockRequestInfo(req);
-      if (definition.delayMs) await sleep(definition.delayMs);
-      const result = await definition.handler(info);
-      const status = result.status ?? 200;
-      logger.info(`[MockServer] ${req.method} ${req.path} -> ${status}`);
-      send(res, status, result.headers, result.body);
-    });
+    this.router[method](
+      definition.path,
+      guarded(async (req, res) => {
+        const info = toMockRequestInfo(req);
+        if (definition.delayMs) await sleep(definition.delayMs);
+        const result = await definition.handler(info);
+        const status = result.status ?? 200;
+        logger.info(`[MockServer] ${req.method} ${req.path} -> ${status}`);
+        send(res, status, result.headers, result.body);
+      }),
+    );
     return this;
   }
 
@@ -125,22 +145,34 @@ export class MockServer {
     this.router = express.Router();
   }
 
+  /** Listens on 127.0.0.1 only: a mock must not be reachable from the runner's network. */
   async start(port = 0): Promise<string> {
-    return new Promise((resolve) => {
-      this.server = this.app.listen(port, () => {
-        const address = this.server?.address();
+    return new Promise((resolve, reject) => {
+      const server = this.app.listen(port, '127.0.0.1', () => {
+        const address = server.address();
         const resolvedPort = typeof address === 'object' && address ? address.port : port;
         this.baseUrl = `http://127.0.0.1:${resolvedPort}`;
         logger.info(`[MockServer] listening at ${this.baseUrl}`);
         resolve(this.baseUrl);
       });
+      server.on('connection', (socket) => {
+        this.sockets.add(socket);
+        socket.on('close', () => this.sockets.delete(socket));
+      });
+      server.once('error', reject);
+      this.server = server;
     });
   }
 
+  /** Stops listening and drops every open connection (a keep-alive socket or a slow request would otherwise keep `close` waiting forever). */
   async stop(): Promise<void> {
-    if (!this.server) return;
+    const server = this.server;
+    if (!server) return;
+    this.server = undefined;
     await new Promise<void>((resolve, reject) => {
-      this.server?.close((err) => (err ? reject(err) : resolve()));
+      server.close((err) => (err ? reject(err) : resolve()));
+      server.closeAllConnections?.();
+      for (const socket of this.sockets) socket.destroy();
     });
     logger.info('[MockServer] stopped');
   }

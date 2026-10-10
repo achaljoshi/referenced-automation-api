@@ -30,6 +30,11 @@ export interface RequestOptions {
   /** Raw body escape hatch - used as-is, no Content-Type inference. */
   rawBody?: string | Buffer;
   timeoutMs?: number;
+  /**
+   * Allow `path` to be a full URL (`https://other.host/x`). Off by default: a path is joined to the client's base URL, and
+   * a full URL in its place would send the request - and the client's auth and default headers - to another host.
+   */
+  absoluteUrl?: boolean;
   /** How many redirects to follow (Playwright's default is 20). 0 returns the 3xx response itself - what `curl` does without `-L`. */
   maxRedirects?: number;
   /** Playwright's own retries of a request that failed at the network level (connection reset, ECONNRESET...). Not for HTTP statuses: use `retry` for those. */

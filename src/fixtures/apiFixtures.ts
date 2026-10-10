@@ -10,6 +10,8 @@ import { formatExchanges } from '../client/exchange';
 import { MockServer } from '../mock/mockServer';
 import { CleanupRegistry } from './cleanup';
 import { ApiScenario } from '../bdd/scenario';
+import { projectDir } from '../util/projectDir';
+import { markTestStart } from '../util/poll';
 
 /** What `apiFor` needs to make a client for another user / system / environment. */
 export interface ApiForOptions {
@@ -46,32 +48,42 @@ export interface ApiFixtures {
  * per-test setup/teardown of an APIRequestContext required.
  */
 export const test = base.extend<ApiFixtures>({
-  correlationId: [async ({}, use, testInfo) => useTestCorrelation(testInfo, use), { auto: true }],
+  correlationId: [
+    async ({}, use, testInfo) => {
+      markTestStart(testInfo);
+      await useTestCorrelation(testInfo, use);
+    },
+    { auto: true },
+  ],
 
-  apiClient: async ({}, use) => {
-    const env = loadEnv();
-    const baseUrl = env.get('API_BASE_URL', '');
-    const context = await playwrightRequest.newContext({ baseURL: baseUrl || undefined });
-    const client = new ApiClient(context, baseUrl);
-    await use(client);
-    await context.dispose();
+  // Built on Playwright's own `request` fixture, so the project's `use` options (ignoreHTTPSErrors, proxy,
+  // extraHTTPHeaders, httpCredentials, clientCertificates, timeouts) apply and the calls show in the trace.
+  // The base URL is the project's `baseURL`, else API_BASE_URL from the .env.<ENV> files NEXT TO the Playwright config
+  // (not the working directory, which differs between an IDE run and CI).
+  apiClient: async ({ request, baseURL }, use, testInfo) => {
+    const env = loadEnv({ dir: projectDir(testInfo) });
+    await use(new ApiClient(request, baseURL || env.get('API_BASE_URL', '')));
   },
 
   apiFor: async ({ apiClient }, use) => {
     const contexts: APIRequestContext[] = [];
     await use(async (options = {}) => {
-      const context = await playwrightRequest.newContext({
-        baseURL: options.baseUrl || undefined,
-        storageState: options.storageState,
-        ignoreHTTPSErrors: options.ignoreHTTPSErrors,
-      });
+      // Only what the caller set: a key passed as `undefined` would hide the project's own `use` value (e.g. ignoreHTTPSErrors).
+      const contextOptions: Parameters<typeof playwrightRequest.newContext>[0] = {};
+      if (options.baseUrl) contextOptions.baseURL = options.baseUrl;
+      if (options.storageState !== undefined) contextOptions.storageState = options.storageState;
+      if (options.ignoreHTTPSErrors !== undefined)
+        contextOptions.ignoreHTTPSErrors = options.ignoreHTTPSErrors;
+      const context = await playwrightRequest.newContext(contextOptions);
       contexts.push(context);
       // Shares apiClient's exchange log, so a failed test's attachment shows every user's calls.
+      // Another user must not carry this client's credentials: only neutral default headers are copied.
       return apiClient
         .scoped({
           baseUrl: options.baseUrl ?? apiClient.getBaseUrl(),
           headers: options.headers,
           auth: options.auth ?? null,
+          dropCredentialHeaders: true,
         })
         .withContext(context);
     });

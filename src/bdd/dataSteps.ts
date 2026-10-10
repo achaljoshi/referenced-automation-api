@@ -1,13 +1,18 @@
 import { placeholders, loadEnv } from '@automation/referenced-automation-utils';
 import type { BddSteps } from './types';
+import { projectDir } from '../util/projectDir';
 
 const { randomValue, relativeDate } = placeholders;
 type Vars = placeholders.ScenarioVariables;
 
 /**
  * Data steps with no UI or API in them - only the scenario's named values - so every kind of feature shares one way
- * to say "remember this for later" and to make data that must be unique or fresh. (The same file is in the UI
- * package; when features use both, register them once - from either package.)
+ * to say "remember this for later" and to make data that must be unique or fresh.
+ *
+ * NOTE: the UI package ships a copy of this file that registers the SAME step texts. A project that registers both
+ * (`registerDataSteps` from here AND from the UI package) gets "ambiguous step" errors from the BDD tool: register the
+ * data steps once, from either package. (The copies are kept identical on purpose so features read the same
+ * whichever is used; making them non-ambiguous means renaming steps in both repos at once.)
  *
  *   Given I set the variable "customer" to "ACME-{{random:alnum(5)}}"
  *   And I generate a random email called "login"
@@ -50,7 +55,7 @@ export function registerDataSteps({ Given, Then }: Pick<BddSteps, 'Given' | 'The
   Given(
     'I read the environment variable {string} into {string}',
     ({ vars }: { vars: Vars }, key: string, name: string) => {
-      vars.set(name, loadEnv().get(key));
+      vars.set(name, loadEnv({ dir: projectDir() }).get(key));
     },
   );
 

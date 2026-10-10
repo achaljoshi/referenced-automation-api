@@ -211,18 +211,40 @@ test.describe('auth strategies', () => {
     expect(response.status()).toBe(401);
   });
 
-  test('OAuth2ClientCredentials fetches and reuses a token', async () => {
+  test('OAuth2ClientCredentials fetches a token once and reuses it', async () => {
+    // a tenant key makes the token endpoint count THIS test's token requests (GET /calls/<key>)
+    const tenant = `reuse-${Date.now()}`;
     const scoped = new ApiClient(context, server.baseUrl).setAuth(
       new OAuth2ClientCredentials({
-        tokenUrl: `${server.baseUrl}/oauth/token`,
+        tokenUrl: `${server.baseUrl}/oauth/token-counted?tenant=${tenant}`,
         clientId: 'client',
         clientSecret: 'secret',
       }),
     );
+    const tokenRequests = async () =>
+      ((await (await context.get(`${server.baseUrl}/calls/token:${tenant}`)).json()) as { calls: number }).calls;
+    expect(await tokenRequests()).toBe(0);
     const first = await scoped.get('/protected/oauth');
     const second = await scoped.get('/protected/oauth');
-    expect(first.get('authenticated')).toBe(true);
-    expect(second.get('authenticated')).toBe(true);
+    const third = await scoped.get('/protected/oauth');
+    expect([first, second, third].map((r) => r.get('authenticated'))).toEqual([true, true, true]);
+    expect(await tokenRequests()).toBe(1); // three API calls, one token request
+  });
+
+  test('a new OAuth2ClientCredentials provider fetches its own token (the count above is per provider)', async () => {
+    const tenant = `own-${Date.now()}`;
+    const make = () =>
+      new ApiClient(context, server.baseUrl).setAuth(
+        new OAuth2ClientCredentials({
+          tokenUrl: `${server.baseUrl}/oauth/token-counted?tenant=${tenant}`,
+          clientId: 'client',
+          clientSecret: 'secret',
+        }),
+      );
+    await make().get('/protected/oauth');
+    await make().get('/protected/oauth');
+    const calls = (await (await context.get(`${server.baseUrl}/calls/token:${tenant}`)).json()) as { calls: number };
+    expect(calls.calls).toBe(2);
   });
 });
 
