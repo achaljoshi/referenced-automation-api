@@ -32,6 +32,10 @@ Options:
                            Point it at your own base test (a relative path) to add your project's fixtures.
   --api-import <module>    Module the auth classes come from. Default: @automation/referenced-automation-api.
   --tag <tag>              Tag added to every test title. Default: @api.
+  --inline                 Write queries, headers, bodies, paths and expected values in the steps. By default the test starts with
+                           CONSTANTS (what every command sends and expects; secrets as getters that read the environment) and
+                           ENDPOINTS (the path of every call), and the steps only refer to them - so a changed input or URL is
+                           one edit at the top.
   --keep-host              Keep scheme and host in every URL. Default: paths only, the host comes from API_BASE_URL
                            (kept automatically if the commands call more than one host).
   --follow-redirects       Follow redirects on every call. Default: only commands that had curl's -L do.
@@ -54,6 +58,7 @@ interface Options {
   apiImport?: string;
   tag?: string;
   keepHost: boolean;
+  inline: boolean;
   followRedirects: boolean;
   keepAllHeaders: boolean;
   params: ParamRule[];
@@ -68,6 +73,7 @@ function parseArgs(argv: string[]): Options {
     out: '',
     stdout: false,
     keepHost: false,
+    inline: false,
     followRedirects: false,
     keepAllHeaders: false,
     params: [],
@@ -90,6 +96,7 @@ function parseArgs(argv: string[]): Options {
     else if (arg === '--api-import') opts.apiImport = value();
     else if (arg === '--tag') opts.tag = value();
     else if (arg === '--keep-host') opts.keepHost = true;
+    else if (arg === '--inline') opts.inline = true;
     else if (arg === '--follow-redirects') opts.followRedirects = true;
     else if (arg === '--keep-all-headers') opts.keepAllHeaders = true;
     else if (arg === '--flow') opts.singleFlow = true;
@@ -141,6 +148,7 @@ function main(): void {
       apiImport: opts.apiImport,
       tag: opts.tag,
       keepHost: opts.keepHost,
+      inline: opts.inline,
       followRedirects: opts.followRedirects,
       keepAllHeaders: opts.keepAllHeaders,
       params: opts.params,

@@ -8,105 +8,173 @@ import { expect, test } from '../support/generatedTest';
 
 const env = loadEnv();
 
+/** Everything the commands send and expect. Change a value here and every step that uses it follows. */
+const CONSTANTS = {
+  // query parameters sent
+  queries: {
+    searchWithQueryParameters: {
+      q: 'lovelace',
+      tag: ['a', 'b'],
+    },
+  },
+  // headers sent (secrets are read from the environment)
+  headers: {
+    listUsers: {
+      accept: 'application/json',
+    },
+  },
+  // request bodies sent (secrets are read from the environment)
+  bodies: {
+    createAUser: {
+      name: 'Grace Hopper',
+      roles: ['admin', 'reviewer'],
+      active: true,
+      address: {
+        city: 'New York',
+      },
+    },
+    replaceAUser: {
+      name: 'Replaced',
+    },
+    submitAForm: {
+      username: 'ada',
+      plan: 'pro',
+    },
+    uploadAFile: {
+      description: 'a fixture',
+      file: { filePath: 'tests/support/fixture.txt', mimeType: 'text/plain' },
+    },
+    postXML: '<user><name>Ada</name></user>',
+  },
+  // what each command checks
+  expected: {
+    listUsers: {
+      status: 200,
+      json: { 'data[0].name': 'Ada Lovelace' },
+      headersContain: { 'content-type': 'json' },
+      maxMs: 5000,
+    },
+    createAUser: { status: 201, json: { name: 'Grace Hopper' } },
+    replaceAUser: { json: { name: 'Replaced' } },
+    searchWithQueryParameters: { json: { 'query.q': 'lovelace', 'query.tag': ['a', 'b'] } },
+    submitAForm: { json: { 'received.username': 'ada' } },
+    uploadAFile: { json: { 'file.originalname': 'fixture.txt' } },
+    basicAuth: { json: { authenticated: true } },
+    bearerToken: { json: { authenticated: true } },
+    aPIKeyHeader: { json: { authenticated: true } },
+    wrongCredentialsAreRefused: { status: 401 },
+    postXML: { status: 200, headersContain: { 'content-type': 'xml' } },
+    aRedirectIsNotFollowedWithout: { status: 302, headers: { location: '/users/1' } },
+    aRedirectIsFollowedWithL: { json: { name: 'Ada Lovelace' } },
+    headersOnly: { headers: { 'x-total-count': '3' } },
+    readThatUser: { json: { name: 'Ada Lovelace', id: 1 } },
+  },
+};
+
+/** Where each call goes. When an endpoint moves, change it here. */
+const ENDPOINTS = {
+  users: '/users',
+  users5: '/users/5',
+  search: '/search',
+  formEcho: '/form-echo',
+  upload: '/upload',
+  protectedBasic: '/protected/basic',
+  protectedBearer: '/protected/bearer',
+  protectedApikey: '/protected/apikey',
+  xmlEcho: '/xml-echo',
+  redirect: '/redirect',
+  betaFeature: '/beta/feature',
+};
+
 test.describe('examples', () => {
   // curl command on line 15
   test('List users @api @smoke', async ({ apiClient }) => {
-    const response = await apiClient.get('/users', {
-      headers: {
-        accept: 'application/json',
-      },
+    const response = await apiClient.get(ENDPOINTS.users, {
+      headers: CONSTANTS.headers.listUsers,
       maxRedirects: 0,
     });
     expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(
-      200,
+      CONSTANTS.expected.listUsers.status,
     );
-    expect(response.get('data[0].name')).toBe('Ada Lovelace');
-    expect(response.header('content-type')).toContain('json');
-    expect(response.durationMs).toBeLessThan(5000);
+    expect(response.get('data[0].name')).toBe(CONSTANTS.expected.listUsers.json['data[0].name']);
+    expect(response.header('content-type')).toContain(
+      CONSTANTS.expected.listUsers.headersContain['content-type'],
+    );
+    expect(response.durationMs).toBeLessThan(CONSTANTS.expected.listUsers.maxMs);
   });
 
   // curl command on line 21
   test('Create a user @api', async ({ apiClient }) => {
-    const response = await apiClient.post('/users', {
-      json: {
-        name: 'Grace Hopper',
-        roles: ['admin', 'reviewer'],
-        active: true,
-        address: {
-          city: 'New York',
-        },
-      },
+    const response = await apiClient.post(ENDPOINTS.users, {
+      json: CONSTANTS.bodies.createAUser,
       maxRedirects: 0,
     });
     expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(
-      201,
+      CONSTANTS.expected.createAUser.status,
     );
-    expect(response.get('name')).toBe('Grace Hopper');
+    expect(response.get('name')).toBe(CONSTANTS.expected.createAUser.json.name);
     expect(response.has('id')).toBe(true);
   });
 
   // curl command on line 27
   test('Replace a user @api', async ({ apiClient }) => {
-    const response = await apiClient.put('/users/5', {
-      json: {
-        name: 'Replaced',
-      },
+    const response = await apiClient.put(ENDPOINTS.users5, {
+      json: CONSTANTS.bodies.replaceAUser,
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('name')).toBe('Replaced');
+    expect(response.get('name')).toBe(CONSTANTS.expected.replaceAUser.json.name);
   });
 
   // curl command on line 32
   test('Search with query parameters @api', async ({ apiClient }) => {
-    const response = await apiClient.get('/search', {
-      queryParams: {
-        q: 'lovelace',
-        tag: ['a', 'b'],
-      },
+    const response = await apiClient.get(ENDPOINTS.search, {
+      queryParams: CONSTANTS.queries.searchWithQueryParameters,
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('query.q')).toBe('lovelace');
-    expect(response.get('query.tag')).toEqual(['a', 'b']);
+    expect(response.get('query.q')).toBe(
+      CONSTANTS.expected.searchWithQueryParameters.json['query.q'],
+    );
+    expect(response.get('query.tag')).toEqual(
+      CONSTANTS.expected.searchWithQueryParameters.json['query.tag'],
+    );
   });
 
   // curl command on line 36
   test('Submit a form @api', async ({ apiClient }) => {
-    const response = await apiClient.post('/form-echo', {
-      form: {
-        username: 'ada',
-        plan: 'pro',
-      },
+    const response = await apiClient.post(ENDPOINTS.formEcho, {
+      form: CONSTANTS.bodies.submitAForm,
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('received.username')).toBe('ada');
+    expect(response.get('received.username')).toBe(
+      CONSTANTS.expected.submitAForm.json['received.username'],
+    );
   });
 
   // curl command on line 40
   test('Upload a file @api', async ({ apiClient }) => {
-    const response = await apiClient.post('/upload', {
-      multipart: {
-        description: 'a fixture',
-        file: { filePath: 'tests/support/fixture.txt', mimeType: 'text/plain' },
-      },
+    const response = await apiClient.post(ENDPOINTS.upload, {
+      multipart: CONSTANTS.bodies.uploadAFile,
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('file.originalname')).toBe('fixture.txt');
+    expect(response.get('file.originalname')).toBe(
+      CONSTANTS.expected.uploadAFile.json['file.originalname'],
+    );
   });
 
   // curl command on line 44
@@ -114,101 +182,107 @@ test.describe('examples', () => {
     apiClient,
   }) => {
     apiClient.setAuth(new BasicAuth(env.get('API_USER'), env.get('API_PASSWORD')));
-    const response = await apiClient.get('/protected/basic', {
+    const response = await apiClient.get(ENDPOINTS.protectedBasic, {
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('authenticated')).toBe(true);
+    expect(response.get('authenticated')).toBe(CONSTANTS.expected.basicAuth.json.authenticated);
   });
 
   // curl command on line 48
   test('Bearer token (from API_TOKEN) @api', async ({ apiClient }) => {
     apiClient.setAuth(new BearerAuth(env.get('API_TOKEN')));
-    const response = await apiClient.get('/protected/bearer', {
+    const response = await apiClient.get(ENDPOINTS.protectedBearer, {
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('authenticated')).toBe(true);
+    expect(response.get('authenticated')).toBe(CONSTANTS.expected.bearerToken.json.authenticated);
   });
 
   // curl command on line 52
   test('API key header (from API_KEY) @api', async ({ apiClient }) => {
     apiClient.setAuth(new ApiKeyAuth('X-API-Key', env.get('API_KEY')));
-    const response = await apiClient.get('/protected/apikey', {
+    const response = await apiClient.get(ENDPOINTS.protectedApikey, {
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('authenticated')).toBe(true);
+    expect(response.get('authenticated')).toBe(CONSTANTS.expected.aPIKeyHeader.json.authenticated);
   });
 
   // curl command on line 57
   test('Wrong credentials are refused @api', async ({ apiClient }) => {
     apiClient.setAuth(new BearerAuth('not-the-token'));
-    const response = await apiClient.get('/protected/bearer', {
+    const response = await apiClient.get(ENDPOINTS.protectedBearer, {
       maxRedirects: 0,
     });
     expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(
-      401,
+      CONSTANTS.expected.wrongCredentialsAreRefused.status,
     );
   });
 
   // curl command on line 62
   test('Post XML @api', async ({ apiClient }) => {
-    const response = await apiClient.post('/xml-echo', {
-      xml: '<user><name>Ada</name></user>',
+    const response = await apiClient.post(ENDPOINTS.xmlEcho, {
+      xml: CONSTANTS.bodies.postXML,
       maxRedirects: 0,
     });
     expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(
-      200,
+      CONSTANTS.expected.postXML.status,
     );
-    expect(response.header('content-type')).toContain('xml');
+    expect(response.header('content-type')).toContain(
+      CONSTANTS.expected.postXML.headersContain['content-type'],
+    );
   });
 
   // curl command on line 67
   test('A redirect is not followed without -L @api', async ({ apiClient }) => {
-    const response = await apiClient.get('/redirect', {
+    const response = await apiClient.get(ENDPOINTS.redirect, {
       maxRedirects: 0,
     });
     expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(
-      302,
+      CONSTANTS.expected.aRedirectIsNotFollowedWithout.status,
     );
-    expect(response.header('location')).toBe('/users/1');
+    expect(response.header('location')).toBe(
+      CONSTANTS.expected.aRedirectIsNotFollowedWithout.headers.location,
+    );
   });
 
   // curl command on line 71
   test('A redirect is followed with -L @api', async ({ apiClient }) => {
-    const response = await apiClient.get('/redirect');
+    const response = await apiClient.get(ENDPOINTS.redirect);
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.get('name')).toBe('Ada Lovelace');
+    expect(response.get('name')).toBe(CONSTANTS.expected.aRedirectIsFollowedWithL.json.name);
   });
 
   // curl command on line 75
   test('Headers only @api', async ({ apiClient }) => {
-    const response = await apiClient.head('/users', {
+    const response = await apiClient.head(ENDPOINTS.users, {
       maxRedirects: 0,
     });
     expect(
       response.ok(),
       `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
     ).toBe(true);
-    expect(response.header('x-total-count')).toBe('3');
+    expect(response.header('x-total-count')).toBe(
+      CONSTANTS.expected.headersOnly.headers['x-total-count'],
+    );
   });
 
   // curl command on line 79 - skipped: the endpoint does not exist in this environment
   test.skip('Not deployed yet @api', async ({ apiClient }) => {
-    const response = await apiClient.get('/beta/feature', {
+    const response = await apiClient.get(ENDPOINTS.betaFeature, {
       maxRedirects: 0,
     });
     expect(
@@ -221,7 +295,7 @@ test.describe('examples', () => {
   test('Read a user found in the list @api', async ({ apiClient }) => {
     let firstId = '';
     await test.step('Find the first user', async () => {
-      const response = await apiClient.get('/users', {
+      const response = await apiClient.get(ENDPOINTS.users, {
         maxRedirects: 0,
       });
       expect(
@@ -238,8 +312,8 @@ test.describe('examples', () => {
         response.ok(),
         `Expected a 2xx response but got ${response.status()}\n${response.text().slice(0, 500)}`,
       ).toBe(true);
-      expect(response.get('name')).toBe('Ada Lovelace');
-      expect(response.get('id')).toBe(1);
+      expect(response.get('name')).toBe(CONSTANTS.expected.readThatUser.json.name);
+      expect(response.get('id')).toBe(CONSTANTS.expected.readThatUser.json.id);
     });
   });
 });

@@ -189,8 +189,10 @@ curl https://x.test/c
 });
 
 test.describe('generated tests', () => {
+  // These tests are about how each curl flag maps onto the framework, so they read the code in the steps: `inline` keeps
+  // paths, headers, bodies and expected values where they are used. CONSTANTS / ENDPOINTS (the default) are tested below.
   const convert = (text: string, options: Partial<Parameters<typeof convertCurl>[1]> = {}) =>
-    convertCurl(text, { source: 'x.curl', ...options });
+    convertCurl(text, { source: 'x.curl', inline: true, ...options });
 
   test('the call maps onto the framework: verb, path, query, headers, json body; the host moves to API_BASE_URL', () => {
     const { code, origins, warnings } = convert(
@@ -416,7 +418,9 @@ test.describe('generated tests', () => {
     expect(code).toContain('`/users/${id}`');
     expect(code).toContain("await test.step('Create'");
     expect(warnings.join('\n')).toMatch(/\{\{nope\}\} is not a variable saved by an earlier/);
-    expect(warnings.join('\n')).toMatch(/"# save: ignored" above the command on line 9 was ignored/);
+    expect(warnings.join('\n')).toMatch(
+      /"# save: ignored" above the command on line 9 was ignored/,
+    );
     expect(code).toContain("test('GET /same @api'");
     expect(code).toMatch(/test\('GET \/same \(line 10\) @api'/);
   });
@@ -481,6 +485,119 @@ test.describe('generated tests', () => {
   });
 });
 
+test.describe('CONSTANTS and ENDPOINTS (the default)', () => {
+  const file = [
+    '# name: Create a user',
+    '# expect: 201',
+    '# expect-json: name = Ada',
+    '# expect-header: content-type ~ json',
+    '# expect-body-contains: created',
+    '# expect-max-ms: 800',
+    'curl -X POST \'https://api.test/users?notify=true&tag=a&tag=b\' -H \'Content-Type: application/json\' -H \'X-Trace: t1\' -H \'X-Session-Token: tok-9\' -H \'X-Api-Key: key-1\' -d \'{"name":"Ada","password":"hunter2","roles":["admin"]}\'',
+    '',
+    '# name: Read it back',
+    '# expect: 200,204',
+    "curl 'https://api.test/users'",
+    '',
+    '# name: Gone',
+    '# expect: 4xx',
+    "curl -X DELETE 'https://api.test/users/9'",
+    '',
+    '# flow: Chain',
+    '# name: Find',
+    '# save: id = data[0].id',
+    "curl 'https://api.test/users'",
+    '# name: Read one',
+    "curl 'https://api.test/users/{{id}}' -H 'X-Trace: t2'",
+  ].join('\n');
+  const { code } = convertCurl(file, { source: 'x.curl' });
+  const steps = code.slice(code.indexOf('test.describe('));
+
+  test('the file starts with CONSTANTS, then ENDPOINTS, then the tests - and the steps only refer to them', () => {
+    const constants = code.indexOf('const CONSTANTS = {');
+    const endpoints = code.indexOf('const ENDPOINTS = {');
+    expect(constants).toBeGreaterThan(0);
+    expect(endpoints).toBeGreaterThan(constants);
+    expect(code.indexOf('test.describe(')).toBeGreaterThan(endpoints);
+    expect(steps).not.toMatch(/'\/users'|'application\/json'|'Ada'|notify|'t1'|created/);
+    expect(steps).toContain('apiClient.post(ENDPOINTS.users,');
+  });
+
+  test("CONSTANTS: what each command sends (query, headers, body) and expects, under the command's name", () => {
+    expect(code).toContain(
+      "  // query parameters sent\n  queries: {\n    createAUser: {\n      notify: 'true',\n      tag: ['a', 'b'],",
+    );
+    expect(code).toContain("X-Trace: 't1',".replace('X-Trace', "'X-Trace'"));
+    expect(code).toContain("name: 'Ada',");
+    expect(code).toMatch(/roles: \[\s*'admin',?\s*\]/);
+    expect(code).toContain(
+      "createAUser: { status: 201, json: { name: 'Ada' }, headersContain: { 'content-type': 'json' }, bodyContains: ['created'], maxMs: 800 },",
+    );
+    expect(code).toContain('readItBack: { status: [200, 204] },');
+    expect(code).toContain('gone: { statusClass: 4 },');
+    expect(steps).toContain('queryParams: CONSTANTS.queries.createAUser');
+    expect(steps).toContain('headers: CONSTANTS.headers.createAUser');
+    expect(steps).toContain('json: CONSTANTS.bodies.createAUser');
+    expect(steps).toContain('toBe(CONSTANTS.expected.createAUser.status)');
+    expect(steps).toContain(
+      "expect(response.get('name')).toBe(CONSTANTS.expected.createAUser.json.name)",
+    );
+    expect(steps).toContain(
+      "toContain(CONSTANTS.expected.createAUser.headersContain['content-type'])",
+    );
+    expect(steps).toContain('toContain(CONSTANTS.expected.createAUser.bodyContains[0])');
+    expect(steps).toContain('toBeLessThan(CONSTANTS.expected.createAUser.maxMs)');
+    expect(steps).toContain(
+      'expect(CONSTANTS.expected.readItBack.status).toContain(response.status())',
+    );
+    expect(steps).toContain('toBe(CONSTANTS.expected.gone.statusClass)');
+  });
+
+  test('secrets are getters that read the environment - never values - so a missing variable names itself when used', () => {
+    expect(code).not.toContain('hunter2');
+    expect(code).not.toContain('key-1');
+    expect(code).not.toContain('tok-9');
+    expect(code).toContain("get password() {\n        return env.get('API_PASSWORD');\n      },");
+    expect(code).toContain(
+      "get 'X-Session-Token'() {\n        return env.get('API_X_SESSION_TOKEN');\n      },",
+    );
+    // an API key header becomes the framework's ApiKeyAuth, still reading the environment, in the step
+    expect(steps).toContain("new ApiKeyAuth('X-Api-Key', env.get('API_KEY'))");
+  });
+
+  test('ENDPOINTS: one entry per path however often it is called; the host stays out (API_BASE_URL)', () => {
+    expect(code).toContain("  users: '/users',");
+    expect(code).toContain("  users9: '/users/9',");
+    expect(code.match(/users: '\/users'/g)).toHaveLength(1);
+    expect(steps.match(/ENDPOINTS\.users,/g)!.length).toBeGreaterThanOrEqual(3);
+    const objectsPart = code.slice(code.indexOf('const CONSTANTS'), code.indexOf('test.describe('));
+    expect(objectsPart).not.toContain('https://api.test');
+  });
+
+  test('what only exists while a flow runs stays in the step: a path or header built from a saved value', () => {
+    expect(steps).toContain('apiClient.get(`/users/${id}`');
+    const objectsPart = code.slice(code.indexOf('const CONSTANTS'), code.indexOf('test.describe('));
+    expect(objectsPart).not.toContain('${id}');
+    expect(objectsPart).not.toContain('/users/${');
+  });
+
+  test('--inline writes none of it into an object: paths, bodies and expectations stay in the steps', () => {
+    const inline = convertCurl(file, { source: 'x.curl', inline: true }).code;
+    expect(inline).not.toMatch(/CONSTANTS|ENDPOINTS/);
+    expect(inline).toContain("apiClient.post('/users'");
+    expect(inline).toContain('.toBe(201)');
+  });
+
+  test('two commands with the same title get numbered keys; titles with an explanation keep only the name', () => {
+    const { code: twice } = convertCurl(
+      '# name: Basic auth (credentials come from API_USER)\n# expect-json: ok = true\ncurl -u a:b https://api.test/x\n# name: Basic auth\n# expect-json: ok = true\ncurl -u a:b https://api.test/y',
+      { source: 'x.curl' },
+    );
+    expect(twice).toContain('basicAuth');
+    expect(twice).toContain('basicAuth2');
+  });
+});
+
 test.describe('api-curl-to-playwright command', () => {
   const cli = path.join(__dirname, '..', 'dist', 'cli', 'curlToTests.js');
   const run = (args: string[], input?: string, cwd?: string) =>
@@ -507,7 +624,11 @@ test.describe('api-curl-to-playwright command', () => {
   test('--stdout, standard input and a folder of files', () => {
     const fromStdin = run(['-', '--stdout'], 'curl https://api.test/a\n');
     expect(fromStdin.status).toBe(0);
-    expect(fromStdin.stdout).toContain("apiClient.get('/a'");
+    expect(fromStdin.stdout).toContain("a: '/a',"); // ENDPOINTS
+    expect(fromStdin.stdout).toContain('apiClient.get(ENDPOINTS.a');
+    expect(run(['-', '--stdout', '--inline'], 'curl https://api.test/a\n').stdout).toContain(
+      "apiClient.get('/a'",
+    );
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curl-cli-'));
     fs.writeFileSync(path.join(dir, 'a.curl'), 'curl https://api.test/a\n');

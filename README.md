@@ -177,16 +177,24 @@ pbpaste | npx api-curl-to-playwright - --stdout           # straight from the cl
 curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -H 'Authorization: Bearer abc' -d '{"name":"Ada"}'
 ```
 
-becomes
+becomes - with every value in one place at the top, and the steps only referring to it:
 
 ```ts
+const CONSTANTS = {                                   // what every command sends and expects
+  bodies: { createAUser: { name: 'Ada' } },
+  expected: { createAUser: { status: 201, json: { name: 'Ada' } } },
+};
+const ENDPOINTS = { users: '/users' };                // where each call goes
+
 test('Create a user @api', async ({ apiClient }) => {
   apiClient.setAuth(new BearerAuth(env.get('API_TOKEN')));          // the token is never written into the test
-  const response = await apiClient.post('/users', { json: { name: 'Ada' }, maxRedirects: 0 });
-  expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(201);
-  expect(response.get('name')).toBe('Ada');
+  const response = await apiClient.post(ENDPOINTS.users, { json: CONSTANTS.bodies.createAUser, maxRedirects: 0 });
+  expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(CONSTANTS.expected.createAUser.status);
+  expect(response.get('name')).toBe(CONSTANTS.expected.createAUser.json.name);
 });
 ```
+
+Change a body, a query parameter, a header or an expected value in `CONSTANTS`; move an endpoint in `ENDPOINTS` - every step that uses it follows. Values that read the environment (passwords, tokens, anything named like a secret) are getters, so a missing variable names itself when it is used; values that only exist while a flow runs (`{{userId}}` saved from an earlier step) stay in the step. `--inline` writes everything in the steps instead.
 
 - Calls map onto the framework: `apiClient.get/post/...`, `queryParams`, `json` / `form` / `xml` / `multipart` / `rawBody`, `BearerAuth` / `BasicAuth` / `ApiKeyAuth`, `timeoutMs`; the host moves to `API_BASE_URL` (kept in full when the commands call several hosts, or with `--keep-host`).
 - **Secrets are never written**: anything named like a password, token, secret, api key, authorization or cookie - in a header, query, form field or JSON key, and `-u user:pass` - is read with `env.get('API_...')`; the command prints which variables to set. `--param 'accountNumber=ACCOUNT'` adds more; `# secret: inline` writes deliberately fake credentials (a wrong-password test) as they are.

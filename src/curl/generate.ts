@@ -30,6 +30,12 @@ export interface GenerateOptions {
   singleFlow?: boolean;
   /** Title of the wrapping `test.describe`. Default: the source file name. */
   title?: string;
+  /**
+   * By default the test starts with two objects the steps refer to: CONSTANTS (every query, header and body sent, every
+   * expected status / field / header / timing - secrets as getters that read the environment) and ENDPOINTS (the path of
+   * every call), so a changed input or URL is one edit at the top. `inline` writes them in the steps instead.
+   */
+  inline?: boolean;
 }
 
 export interface GeneratedTests {
@@ -76,6 +82,17 @@ class Context {
   saved = new Set<string>();
   /** `# secret: inline` on the command being generated. */
   inlineSecrets = false;
+  /** Values that read the environment are written as getters (they live in CONSTANTS). */
+  get lazy(): boolean {
+    return this.objects;
+  }
+
+  // CONSTANTS and ENDPOINTS
+  readonly constants = new Map<string, Array<{ name: string; code: string }>>();
+  readonly endpoints = new Map<string, string>();
+  readonly expected = new Map<string, ExpectedEntry>();
+  private readonly keys = new Set<string>();
+  readonly commandKeys = new Map<CurlEntry, string>();
 
   constructor(
     readonly options: GenerateOptions,
@@ -91,6 +108,84 @@ class Context {
   warn(message: string): void {
     this.warnings.push(message);
   }
+
+  /** CONSTANTS and ENDPOINTS are written (unless `inline`). */
+  get objects(): boolean {
+    return !this.options.inline;
+  }
+
+  /** The name of a command in CONSTANTS: its title in camel case, numbered when two commands share one. */
+  keyFor(entry: CurlEntry): string {
+    const existing = this.commandKeys.get(entry);
+    if (existing) return existing;
+    // `Basic auth (credentials come from ...)` -> `basicAuth`: the key names the command, not its explanation
+    const base = camelName(titleOf(entry).split(/\s+\(|\s+-\s+/)[0] ?? '') || 'request';
+    let key = base;
+    for (let n = 2; this.keys.has(key); n++) key = `${base}${n}`;
+    this.keys.add(key);
+    this.commandKeys.set(entry, key);
+    return key;
+  }
+
+  /** True when `code` reads something that only exists while a flow runs (a value saved by an earlier step) or a file: it cannot live in a constant. */
+  private dynamic(code: string): boolean {
+    return [...this.saved].some((name) => code.includes('${' + name + '}')) || /\bfs\./.test(code);
+  }
+
+  /** A value of a command as CONSTANTS.<section>.<key> - or the code itself when it cannot (or must not) be a constant. */
+  register(section: 'queries' | 'headers' | 'bodies', key: string, code: string): string {
+    if (!this.objects || this.dynamic(code)) return code;
+    const entries = this.constants.get(section) ?? [];
+    this.constants.set(section, entries);
+    // the code was laid out for the step it came from; in CONSTANTS it sits one level shallower
+    entries.push({
+      name: key,
+      code: code
+        .split('\n')
+        .map((line, i) => (i === 0 ? line : line.replace(/^ {2}/, '')))
+        .join('\n'),
+    });
+    return `CONSTANTS.${section}.${key}`;
+  }
+
+  /** The path of a call as ENDPOINTS.<name> - or the code itself when it is built at run time. */
+  endpoint(code: string, path: string): string {
+    if (!this.objects || code.startsWith('`') || this.dynamic(code)) return code;
+    const existing = [...this.endpoints.entries()].find(([, value]) => value === code);
+    if (existing) return `ENDPOINTS.${existing[0]}`;
+    const base = camelName(path.split('?')[0]?.replace(/^https?:\/\/[^/]+/i, '') ?? '') || 'root';
+    let name = IDENTIFIER.test(base) ? base : `path${base}`;
+    for (let n = 2; this.endpoints.has(name); n++) name = `${base}${n}`;
+    this.endpoints.set(name, code);
+    return `ENDPOINTS.${name}`;
+  }
+}
+
+interface ExpectedEntry {
+  status?: string;
+  statusClass?: string;
+  json: Array<[string, string]>;
+  headers: Array<[string, string]>;
+  headersContain: Array<[string, string]>;
+  bodyContains: string[];
+  maxMs?: number;
+}
+
+const WORD_LIMIT = 6;
+/** `Create a user` -> `createAUser`; `GET /users/5` -> `getUsers5`. */
+function camelName(text: string): string {
+  const words = text
+    .replace(/[^A-Za-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, WORD_LIMIT);
+  const name = words
+    .map((w, i) =>
+      i === 0 ? w.charAt(0).toLowerCase() + w.slice(1) : w.charAt(0).toUpperCase() + w.slice(1),
+    )
+    .join('');
+  return /^[0-9]/.test(name) ? `n${name}` : name;
 }
 
 /** The environment variable a named value must come from, when its NAME marks it as secret (or a --param rule says so). */
@@ -170,17 +265,28 @@ function jsonLiteral(
   const entries = Object.entries(value as Record<string, unknown>);
   if (entries.length === 0) return '{}';
   return `{\n${entries
-    .map(
-      ([key, item]) =>
-        `${pad}${IDENTIFIER.test(key) ? key : quote(key)}: ${jsonLiteral(ctx, item, shellVars, indent + 1, key)}`,
-    )
+    .map(([key, item]) => {
+      const code = jsonLiteral(ctx, item, shellVars, indent + 1, key);
+      const name = IDENTIFIER.test(key) ? key : quote(key);
+      const isObject = item !== null && typeof item === 'object' && !Array.isArray(item);
+      // A value that reads the environment is a getter, so a missing variable names itself when used, not when the file loads.
+      return ctx.lazy && !isObject && code.includes('env.get(')
+        ? `${pad}get ${name}() {\n${pad}  return ${code};\n${pad}}`
+        : `${pad}${name}: ${code}`;
+    })
     .join(',\n')},\n${closePad}}`;
 }
 
-function objectLiteral(entries: Array<[string, string]>, indent: number): string {
+function objectLiteral(entries: Array<[string, string]>, indent: number, lazy = false): string {
   if (entries.length === 0) return '{}';
   const pad = '  '.repeat(indent + 1);
-  return `{\n${entries.map(([key, expr]) => `${pad}${IDENTIFIER.test(key) ? key : quote(key)}: ${expr}`).join(',\n')},\n${'  '.repeat(indent)}}`;
+  const lines = entries.map(([key, expr]) => {
+    const name = IDENTIFIER.test(key) ? key : quote(key);
+    return lazy && expr.includes('env.get(')
+      ? `${pad}get ${name}() {\n${pad}  return ${expr};\n${pad}}`
+      : `${pad}${name}: ${expr}`;
+  });
+  return `{\n${lines.join(',\n')},\n${'  '.repeat(indent)}}`;
 }
 
 interface RequestCode {
@@ -262,6 +368,7 @@ function buildRequest(
   parsed: ParsedCurl,
   keepHost: boolean,
   indent: number,
+  key: string,
 ): RequestCode {
   const options = ctx.options;
   const shellVars = parsed.variables;
@@ -338,7 +445,7 @@ function buildRequest(
       }
       return [field.name, namedValueExpr(ctx, field.name, field.value, shellVars)];
     });
-    optionEntries.push(['multipart', objectLiteral(entries, indent + 1)]);
+    optionEntries.push(['multipart', objectLiteral(entries, indent + 1, ctx.lazy)]);
     dropContentType();
   } else if (parsed.bodyFile !== undefined) {
     ctx.usesFs = true;
@@ -390,6 +497,7 @@ function buildRequest(
               namedValueExpr(ctx, k, v, shellVars),
             ]),
             indent + 1,
+            ctx.lazy,
           ),
         ]);
         dropContentType();
@@ -432,9 +540,23 @@ function buildRequest(
   ]);
 
   const ordered: Array<[string, string]> = [];
-  if (kept.length > 0) ordered.push(['headers', objectLiteral(kept, indent + 1)]);
-  if (query.length > 0) ordered.push(['queryParams', objectLiteral(query, indent + 1)]);
-  ordered.push(...optionEntries);
+  if (kept.length > 0)
+    ordered.push([
+      'headers',
+      ctx.register('headers', key, objectLiteral(kept, indent + 1, ctx.lazy)),
+    ]);
+  if (query.length > 0)
+    ordered.push([
+      'queryParams',
+      ctx.register('queries', key, objectLiteral(query, indent + 1, ctx.lazy)),
+    ]);
+  // the one body (json / form / multipart / xml / raw), unless it is read from a file or built from a saved value
+  ordered.push(
+    ...optionEntries.map(([name, code]): [string, string] => [
+      name,
+      ctx.register('bodies', key, code),
+    ]),
+  );
   if (parsed.timeoutSeconds !== undefined)
     ordered.push(['timeoutMs', String(Math.round(parsed.timeoutSeconds * 1000))]);
   if (!parsed.followRedirects && !options.followRedirects) ordered.push(['maxRedirects', '0']);
@@ -448,9 +570,10 @@ function buildRequest(
     ? method
     : undefined;
   const optionsText = ordered.length > 0 ? `, ${objectLiteral(ordered, indent)}` : '';
+  const pathCode = ctx.endpoint(textExpr(ctx, target, shellVars), target);
   const call = verb
-    ? `apiClient.${verb}(${textExpr(ctx, target, shellVars)}${optionsText})`
-    : `apiClient.request(${quote(parsed.method)}, ${textExpr(ctx, target, shellVars)}${optionsText})`;
+    ? `apiClient.${verb}(${pathCode}${optionsText})`
+    : `apiClient.request(${quote(parsed.method)}, ${pathCode}${optionsText})`;
   if (!verb)
     ctx.warn(
       `HTTP method ${parsed.method} is not one of the ApiClient's verbs; it is sent with apiClient.request()`,
@@ -458,27 +581,13 @@ function buildRequest(
   return { authLines, call };
 }
 
-function statusAssertion(expect: string | undefined): string[] {
-  if (!expect)
-    return [
-      'expect(response.ok(), `Expected a 2xx response but got ${response.status()}\\n${response.text().slice(0, 500)}`).toBe(true);',
-    ];
-  const klass = /^([1-5])xx$/i.exec(expect);
-  if (klass) {
-    return klass[1] === '2'
-      ? [
-          'expect(response.ok(), `Expected a 2xx response but got ${response.status()}\\n${response.text().slice(0, 500)}`).toBe(true);',
-        ]
-      : [`expect(Math.floor(response.status() / 100)).toBe(${klass[1]});`];
-  }
-  if (expect.includes(','))
-    return [`expect([${expect.split(',').join(', ')}]).toContain(response.status());`];
-  return [
-    `expect(response.status(), \`Unexpected status; body: \${response.text().slice(0, 500)}\`).toBe(${expect});`,
-  ];
-}
+const OK_MESSAGE =
+  'Expected a 2xx response but got ${response.status()}\\n${response.text().slice(0, 500)}';
 
-/** A value as TypeScript source in this repo's style (single quotes, unquoted keys). */
+/** `.json.name` for a plain key, `.json['data[0].name']` for a path. */
+const access = (key: string) => (IDENTIFIER.test(key) ? `.${key}` : `[${quote(key)}]`);
+
+/** TypeScript source for a value in this repo's style. */
 function valueLiteral(value: unknown): string {
   if (typeof value === 'string') return quote(value);
   if (Array.isArray(value)) return `[${value.map(valueLiteral).join(', ')}]`;
@@ -491,33 +600,86 @@ function valueLiteral(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function assertions(ctx: Context, directives: Directives): string[] {
-  const lines = statusAssertion(directives.expect);
-  for (const check of directives.expectJson) {
-    if (check.present) lines.push(`expect(response.has(${quote(check.path)})).toBe(true);`);
-    else {
-      const matcher = check.value !== null && typeof check.value === 'object' ? 'toEqual' : 'toBe';
-      lines.push(
-        `expect(response.get(${quote(check.path)})).${matcher}(${valueLiteral(check.value)});`,
-      );
-    }
-  }
-  for (const header of directives.expectHeader) {
+function assertions(ctx: Context, directives: Directives, key: string): string[] {
+  const lines: string[] = [];
+  const entry: ExpectedEntry = { json: [], headers: [], headersContain: [], bodyContains: [] };
+  const ref = (path: string) => `CONSTANTS.expected.${key}${path}`;
+  const objects = ctx.objects;
+
+  // ---- status ----
+  const status = directives.expect;
+  if (!status || /^2xx$/i.test(status)) {
+    lines.push(`expect(response.ok(), \`${OK_MESSAGE}\`).toBe(true);`);
+  } else if (/^[1-5]xx$/i.test(status)) {
+    const klass = status.charAt(0);
+    if (objects) entry.statusClass = klass;
     lines.push(
-      header.contains
-        ? `expect(response.header(${quote(header.name)})).toContain(${quote(header.value)});`
-        : `expect(response.header(${quote(header.name)})).toBe(${quote(header.value)});`,
+      `expect(Math.floor(response.status() / 100)).toBe(${objects ? ref('.statusClass') : klass});`,
+    );
+  } else if (status.includes(',')) {
+    const list = `[${status.split(',').join(', ')}]`;
+    if (objects) entry.status = list;
+    lines.push(`expect(${objects ? ref('.status') : list}).toContain(response.status());`);
+  } else {
+    if (objects) entry.status = status;
+    lines.push(
+      `expect(response.status(), \`Unexpected status; body: \${response.text().slice(0, 500)}\`).toBe(${objects ? ref('.status') : status});`,
     );
   }
-  for (const text of directives.expectBodyContains)
-    lines.push(`expect(response.text()).toContain(${quote(text)});`);
-  if (directives.maxMs !== undefined)
-    lines.push(`expect(response.durationMs).toBeLessThan(${directives.maxMs});`);
+
+  // ---- body fields ----
+  for (const check of directives.expectJson) {
+    if (check.present) {
+      lines.push(`expect(response.has(${quote(check.path)})).toBe(true);`);
+      continue;
+    }
+    const matcher = check.value !== null && typeof check.value === 'object' ? 'toEqual' : 'toBe';
+    if (objects) entry.json.push([check.path, valueLiteral(check.value)]);
+    lines.push(
+      `expect(response.get(${quote(check.path)})).${matcher}(${objects ? ref(`.json${access(check.path)}`) : valueLiteral(check.value)});`,
+    );
+  }
+  // ---- headers ----
+  for (const header of directives.expectHeader) {
+    const name = header.name.toLowerCase();
+    if (objects)
+      (header.contains ? entry.headersContain : entry.headers).push([name, quote(header.value)]);
+    const expected = objects
+      ? ref(`.${header.contains ? 'headersContain' : 'headers'}${access(name)}`)
+      : quote(header.value);
+    lines.push(
+      `expect(response.header(${quote(header.name)})).${header.contains ? 'toContain' : 'toBe'}(${expected});`,
+    );
+  }
+  directives.expectBodyContains.forEach((text, index) => {
+    if (objects) entry.bodyContains.push(quote(text));
+    lines.push(
+      `expect(response.text()).toContain(${objects ? ref(`.bodyContains[${index}]`) : quote(text)});`,
+    );
+  });
+  if (directives.maxMs !== undefined) {
+    if (objects) entry.maxMs = directives.maxMs;
+    lines.push(
+      `expect(response.durationMs).toBeLessThan(${objects ? ref('.maxMs') : directives.maxMs});`,
+    );
+  }
   if (directives.schema) {
     ctx.usesFs = true;
     lines.push(
       `response.expectSchema(JSON.parse(fs.readFileSync(${quote(directives.schema)}, 'utf8')));`,
     );
+  }
+  if (
+    objects &&
+    (entry.status ||
+      entry.statusClass ||
+      entry.json.length ||
+      entry.headers.length ||
+      entry.headersContain.length ||
+      entry.bodyContains.length ||
+      entry.maxMs !== undefined)
+  ) {
+    ctx.expected.set(key, entry);
   }
   return lines;
 }
@@ -526,6 +688,75 @@ function titleOf(entry: CurlEntry): string {
   if (entry.directives.name) return entry.directives.name;
   const url = entry.parsed.url.replace(/^https?:\/\/[^/]+/i, '').replace(/\?.*$/, '') || '/';
   return `${entry.parsed.method} ${url}`;
+}
+
+/** The CONSTANTS object: what every command sends (queries, headers, bodies) and what every command expects, named per command. */
+function constantsBlock(ctx: Context): string[] {
+  const sections: Array<[string, string, string[]]> = [];
+  const describe: Record<string, string> = {
+    queries: 'query parameters sent',
+    headers: 'headers sent (secrets are read from the environment)',
+    bodies: 'request bodies sent (secrets are read from the environment)',
+  };
+  for (const section of ['queries', 'headers', 'bodies']) {
+    const entries = ctx.constants.get(section);
+    if (!entries || entries.length === 0) continue;
+    sections.push([
+      section,
+      describe[section] as string,
+      entries.map((e) => entryCode(e.name, e.code)),
+    ]);
+  }
+  if (ctx.expected.size > 0) {
+    const lines = [...ctx.expected.entries()].map(([key, e]) => {
+      const fields: string[] = [];
+      if (e.status) fields.push(`status: ${e.status}`);
+      if (e.statusClass) fields.push(`statusClass: ${e.statusClass}`);
+      const group = (name: string, list: Array<[string, string]>) => {
+        if (list.length > 0)
+          fields.push(
+            `${name}: { ${list.map(([k, v]) => `${IDENTIFIER.test(k) ? k : quote(k)}: ${v}`).join(', ')} }`,
+          );
+      };
+      group('json', e.json);
+      group('headers', e.headers);
+      group('headersContain', e.headersContain);
+      if (e.bodyContains.length > 0) fields.push(`bodyContains: [${e.bodyContains.join(', ')}]`);
+      if (e.maxMs !== undefined) fields.push(`maxMs: ${e.maxMs}`);
+      return `${key}: { ${fields.join(', ')} },`;
+    });
+    sections.push(['expected', 'what each command checks', lines]);
+  }
+  if (sections.length === 0) return [];
+  return [
+    '/** Everything the commands send and expect. Change a value here and every step that uses it follows. */',
+    'const CONSTANTS = {',
+    ...sections.flatMap(([name, comment, entries]) => [
+      `  // ${comment}`,
+      `  ${name}: {`,
+      ...entries.flatMap((entry) => entry.split('\n').map((line) => `    ${line}`)),
+      '  },',
+    ]),
+    '};',
+    '',
+  ];
+}
+
+/** `name: code,` where a multi-line code (an object) keeps its closing brace aligned. */
+function entryCode(name: string, code: string): string {
+  return `${name}: ${code},`;
+}
+
+/** The ENDPOINTS object: where every call goes. */
+function endpointsBlock(ctx: Context): string[] {
+  if (ctx.endpoints.size === 0) return [];
+  return [
+    '/** Where each call goes. When an endpoint moves, change it here. */',
+    'const ENDPOINTS = {',
+    ...[...ctx.endpoints.entries()].map(([name, code]) => `  ${name}: ${code},`),
+    '};',
+    '',
+  ];
 }
 
 function indentLines(lines: string[], pad: string): string[] {
@@ -589,10 +820,11 @@ export function generateTests(entries: CurlEntry[], options: GenerateOptions): G
     unit.entries.forEach((entry, entryIndex) => {
       const stepLines: string[] = [];
       ctx.inlineSecrets = entry.directives.inlineSecrets === true;
-      const request = buildRequest(ctx, entry.parsed, keepHost, 0);
+      const key = ctx.keyFor(entry);
+      const request = buildRequest(ctx, entry.parsed, keepHost, 0, key);
       stepLines.push(...request.authLines);
       stepLines.push(`const response = await ${request.call};`);
-      stepLines.push(...assertions(ctx, entry.directives));
+      stepLines.push(...assertions(ctx, entry.directives, key));
       for (const save of entry.directives.save) {
         if (!isFlow) {
           ctx.warn(
@@ -664,6 +896,8 @@ export function generateTests(entries: CurlEntry[], options: GenerateOptions): G
     ...imports,
     '',
     ...(ctx.usesEnv ? ['const env = loadEnv();', ''] : []),
+    ...constantsBlock(ctx),
+    ...endpointsBlock(ctx),
     `test.describe(${quote(title)}, () => {`,
     ...indentLines(body, '  ').slice(0, -1),
     '});',
