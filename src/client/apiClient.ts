@@ -1,9 +1,18 @@
 import type { APIRequestContext } from '@playwright/test';
-import { getCorrelationId, getLogger, newCorrelationId } from '@automation/referenced-automation-utils';
+import {
+  getCorrelationId,
+  getLogger,
+  newCorrelationId,
+} from '@automation/referenced-automation-utils';
 import type { AuthProvider, AuthTarget } from '../auth/authProvider';
 import { ApiResponse } from './apiResponse';
-import type { HttpMethod, QueryValue, RequestOptions } from './types';
+import type { HttpMethod, QueryValue, RequestOptions, RetryPolicy } from './types';
 import { safeUrl } from './logging';
+import { describeExchange, redactBody, redactHeaders, truncate, type Exchange } from './exchange';
+import { pollUntil, sleep, type PollOptions } from '../util/poll';
+import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as nodePath from 'node:path';
 import { toPlaywrightMultipart } from './multipart';
 import { toXml } from './xml';
 
@@ -18,14 +27,45 @@ export const CORRELATION_HEADER = 'X-Correlation-Id';
 
 const log = getLogger('api');
 
+/** Shared by a client and every client scoped from it, so one place sees all the calls a test made. */
+interface ExchangeLog {
+  entries: Exchange[];
+  listeners: Array<(exchange: Exchange) => void>;
+}
+
+const MAX_LOGGED_EXCHANGES = 200;
+const IDEMPOTENT_METHODS = new Set<HttpMethod>(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
+const DEFAULT_RETRY_STATUSES = [429, 502, 503, 504];
+
+export interface ScopeOverrides {
+  baseUrl?: string;
+  headers?: Record<string, string>;
+  /** A different auth strategy, or `null` to send no auth. Omit to keep this client's. */
+  auth?: AuthProvider | null;
+  retry?: RetryPolicy;
+}
+
 export class ApiClient {
   private defaultHeaders: Record<string, string> = {};
   private authProvider?: AuthProvider;
+  private retryPolicy?: RetryPolicy;
+  private exchangeLog: ExchangeLog = { entries: [], listeners: [] };
 
   constructor(
     private readonly context: APIRequestContext,
-    private readonly baseUrl: string = '',
+    private baseUrl: string = '',
   ) {}
+
+  // ---- base URL ----
+
+  setBaseUrl(baseUrl: string): this {
+    this.baseUrl = baseUrl;
+    return this;
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
 
   // ---- header CRUD (persists across every request made by this client) ----
 
@@ -65,6 +105,57 @@ export class ApiClient {
     return this;
   }
 
+  // ---- retry policy ----
+
+  /** Retry throttled/unavailable responses and network errors with backoff on every call of this client (a per-call `retry` option overrides it). */
+  setRetryPolicy(policy: RetryPolicy | undefined): this {
+    this.retryPolicy = policy;
+    return this;
+  }
+
+  // ---- exchange log: every call this client (and clients scoped from it) made ----
+
+  /** The calls made so far (newest last), headers and bodies with credentials masked. A failed test attaches these to its report. */
+  exchanges(): readonly Exchange[] {
+    return this.exchangeLog.entries;
+  }
+
+  clearExchanges(): this {
+    this.exchangeLog.entries.length = 0;
+    return this;
+  }
+
+  /** Called for every exchange as it completes. Returns a function that stops listening. */
+  onExchange(listener: (exchange: Exchange) => void): () => void {
+    this.exchangeLog.listeners.push(listener);
+    return () => {
+      this.exchangeLog.listeners = this.exchangeLog.listeners.filter((l) => l !== listener);
+    };
+  }
+
+  /**
+   * A client that shares this one's connection and exchange log but has its own headers/auth/base URL - for "the same
+   * API as another user" or "the same API with one different header" without mutating the client other steps use.
+   */
+  scoped(overrides: ScopeOverrides = {}): ApiClient {
+    const child = new ApiClient(this.context, overrides.baseUrl ?? this.baseUrl);
+    child.defaultHeaders = { ...this.defaultHeaders, ...overrides.headers };
+    child.authProvider = overrides.auth === null ? undefined : overrides.auth ?? this.authProvider;
+    child.retryPolicy = overrides.retry ?? this.retryPolicy;
+    child.exchangeLog = this.exchangeLog;
+    return child;
+  }
+
+  /** The same client (headers, auth, retry policy, exchange log) on a different connection - used by `apiFor`, rarely needed directly. */
+  withContext(context: APIRequestContext): ApiClient {
+    const child = new ApiClient(context, this.baseUrl);
+    child.defaultHeaders = { ...this.defaultHeaders };
+    child.authProvider = this.authProvider;
+    child.retryPolicy = this.retryPolicy;
+    child.exchangeLog = this.exchangeLog;
+    return child;
+  }
+
   // ---- path params ----
 
   /** Substitutes {name} placeholders, e.g. resolvePath('/users/{id}', { id: 42 }) -> '/users/42'. */
@@ -80,7 +171,11 @@ export class ApiClient {
 
   // ---- the core call every verb below delegates to ----
 
-  async request(method: HttpMethod, path: string, options: RequestOptions = {}): Promise<ApiResponse> {
+  async request(
+    method: HttpMethod,
+    path: string,
+    options: RequestOptions = {},
+  ): Promise<ApiResponse> {
     const resolvedPath = this.resolvePath(path, options.pathParams);
     const url = this.baseUrl ? new URL(resolvedPath, this.baseUrl).toString() : resolvedPath;
 
@@ -91,10 +186,25 @@ export class ApiClient {
     // Use the test's active correlation ID when there is one (so every call a
     // test makes shares it); otherwise mint one for this request alone. A
     // header the caller set explicitly always wins.
-    const hasCorrelationHeader = Object.keys(target.headers).some((h) => h.toLowerCase() === CORRELATION_HEADER.toLowerCase());
-    if (!hasCorrelationHeader) target.headers[CORRELATION_HEADER] = getCorrelationId() ?? newCorrelationId();
-    const correlationId = Object.entries(target.headers).find(([h]) => h.toLowerCase() === CORRELATION_HEADER.toLowerCase())?.[1];
+    const hasCorrelationHeader = Object.keys(target.headers).some(
+      (h) => h.toLowerCase() === CORRELATION_HEADER.toLowerCase(),
+    );
+    if (!hasCorrelationHeader)
+      target.headers[CORRELATION_HEADER] = getCorrelationId() ?? newCorrelationId();
+    if (
+      options.idempotencyKey !== undefined &&
+      !Object.keys(target.headers).some((h) => h.toLowerCase() === 'idempotency-key')
+    ) {
+      target.headers['Idempotency-Key'] =
+        options.idempotencyKey === true ? randomUUID() : options.idempotencyKey;
+    }
+    const correlationId = Object.entries(target.headers).find(
+      ([h]) => h.toLowerCase() === CORRELATION_HEADER.toLowerCase(),
+    )?.[1];
     if (this.authProvider) {
+      target.method = method;
+      target.path = new URL(resolvedPath, 'http://placeholder.invalid').pathname;
+      target.body = bodyAsText(options);
       await this.authProvider.apply(target);
     }
 
@@ -104,33 +214,133 @@ export class ApiClient {
       params: buildSearchParams(target.queryParams),
       timeout: options.timeoutMs,
       failOnStatusCode: options.failOnStatusCode ?? false,
+      maxRedirects: options.maxRedirects,
+      maxRetries: options.maxRetries,
+      ignoreHTTPSErrors: options.ignoreHTTPSErrors,
     };
 
+    let loggedBody: string | undefined;
     if (options.json !== undefined) {
       fetchOptions.data = options.json;
+      loggedBody = JSON.stringify(options.json);
     } else if (options.xml !== undefined) {
       fetchOptions.data = typeof options.xml === 'string' ? options.xml : toXml(options.xml);
       fetchOptions.headers = { 'Content-Type': 'application/xml', ...fetchOptions.headers };
+      loggedBody = fetchOptions.data as string;
     } else if (options.form) {
       fetchOptions.form = options.form;
+      loggedBody = new URLSearchParams(
+        Object.entries(options.form).map(([k, v]): [string, string] => [k, String(v)]),
+      ).toString();
     } else if (options.multipart) {
       fetchOptions.multipart = toPlaywrightMultipart(options.multipart);
+      loggedBody = `[multipart: ${Object.keys(options.multipart).join(', ')}]`;
     } else if (options.rawBody !== undefined) {
       fetchOptions.data = options.rawBody;
+      loggedBody =
+        typeof options.rawBody === 'string'
+          ? options.rawBody
+          : `[binary: ${options.rawBody.length} bytes]`;
     }
 
-    const startedAt = Date.now();
     const query = buildSearchParams(target.queryParams).toString();
-    const logged = `${method} ${safeUrl(query ? `${url}${url.includes('?') ? '&' : '?'}${query}` : url)}`;
-    try {
-      const raw = await this.context.fetch(url, fetchOptions);
-      const response = await ApiResponse.from(raw);
-      log.info(`${logged} -> ${response.status()} (${Date.now() - startedAt}ms) cid=${String(correlationId).slice(0, 8)}`);
-      return response;
-    } catch (error) {
-      log.error(`${logged} FAILED (${Date.now() - startedAt}ms) cid=${String(correlationId).slice(0, 8)}: ${error instanceof Error ? error.message : String(error)}`);
-      throw error;
+    const fullUrl = query ? `${url}${url.includes('?') ? '&' : '?'}${query}` : url;
+    const logged = `${method} ${safeUrl(fullUrl)}`;
+    const contentType = Object.entries(fetchOptions.headers ?? {}).find(
+      ([h]) => h.toLowerCase() === 'content-type',
+    )?.[1];
+    const policy = this.resolveRetry(method, options);
+    const cid = String(correlationId).slice(0, 8);
+
+    for (let attempt = 1; ; attempt++) {
+      const startedAt = Date.now();
+      const exchange: Exchange = {
+        method,
+        url: safeUrl(fullUrl),
+        requestHeaders: redactHeaders(fetchOptions.headers as Record<string, string>),
+        requestBody: redactBody(loggedBody, contentType),
+        durationMs: 0,
+        attempt,
+        at: new Date().toISOString(),
+      };
+      try {
+        const raw = await this.context.fetch(url, fetchOptions);
+        exchange.durationMs = Date.now() - startedAt;
+        exchange.status = raw.status();
+        exchange.responseHeaders = raw.headers();
+        const response = await ApiResponse.from(raw, { durationMs: exchange.durationMs, exchange });
+        exchange.responseBody = truncate(
+          redactBody(response.text(), exchange.responseHeaders['content-type']) ?? '',
+        );
+        this.record(exchange);
+        log.info(
+          `${logged} -> ${response.status()} (${exchange.durationMs}ms) cid=${cid}${attempt > 1 ? ` attempt ${attempt}` : ''}`,
+        );
+        if (
+          policy &&
+          attempt < policy.attempts &&
+          policy.shouldRetryStatus(response.status(), response.headers())
+        ) {
+          const wait = policy.waitMs(attempt, response.headers());
+          log.warn(
+            `${logged} answered ${response.status()} - retrying in ${wait}ms (attempt ${attempt + 1} of ${policy.attempts})`,
+          );
+          await sleep(wait);
+          continue;
+        }
+        return response;
+      } catch (error) {
+        exchange.durationMs = Date.now() - startedAt;
+        exchange.error = error instanceof Error ? error.message : String(error);
+        this.record(exchange);
+        log.error(`${logged} FAILED (${exchange.durationMs}ms) cid=${cid}: ${exchange.error}`);
+        if (policy && policy.onNetworkError && attempt < policy.attempts) {
+          const wait = policy.waitMs(attempt, {});
+          log.warn(
+            `${logged} had no response - retrying in ${wait}ms (attempt ${attempt + 1} of ${policy.attempts})`,
+          );
+          await sleep(wait);
+          continue;
+        }
+        throw error;
+      }
     }
+  }
+
+  private record(exchange: Exchange): void {
+    const { entries, listeners } = this.exchangeLog;
+    entries.push(exchange);
+    if (entries.length > MAX_LOGGED_EXCHANGES) entries.shift();
+    for (const listener of listeners) listener(exchange);
+  }
+
+  /** The effective retry policy for one call, or undefined when there is none (or the method is not safe to repeat). */
+  private resolveRetry(method: HttpMethod, options: RequestOptions) {
+    const configured = options.retry === false ? undefined : options.retry ?? this.retryPolicy;
+    if (!configured) return undefined;
+    const safe =
+      IDEMPOTENT_METHODS.has(method) ||
+      configured.retryUnsafeMethods === true ||
+      options.idempotencyKey !== undefined;
+    if (!safe) return undefined;
+    const attempts = Math.max(1, configured.attempts ?? 3);
+    const backoffMs = configured.backoffMs ?? 250;
+    const maxBackoffMs = configured.maxBackoffMs ?? 5000;
+    const onStatus = configured.onStatus ?? DEFAULT_RETRY_STATUSES;
+    return {
+      attempts,
+      onNetworkError: configured.onNetworkError ?? true,
+      shouldRetryStatus: (status: number, headers: Record<string, string>) =>
+        typeof onStatus === 'function' ? onStatus(status, headers) : onStatus.includes(status),
+      waitMs: (attempt: number, headers: Record<string, string>) => {
+        if (configured.respectRetryAfter !== false) {
+          const hinted = parseRetryAfter(headers['retry-after']);
+          if (hinted !== undefined) return Math.min(hinted, maxBackoffMs);
+        }
+        const exponential = Math.min(backoffMs * 2 ** (attempt - 1), maxBackoffMs);
+        return Math.round(exponential * (0.75 + Math.random() * 0.5));
+      },
+    };
   }
 
   get(path: string, options?: RequestOptions): Promise<ApiResponse> {
@@ -160,6 +370,124 @@ export class ApiClient {
   options(path: string, options?: RequestOptions): Promise<ApiResponse> {
     return this.request('OPTIONS', path, options);
   }
+
+  // ---- conveniences built on request() ----
+
+  /** GET that must succeed (2xx), returning the parsed body typed as T. A failure shows the status and body. */
+  async getJson<T = unknown>(path: string, options?: RequestOptions): Promise<T> {
+    const response = await this.get(path, options);
+    response.expectStatusInRange(200, 299);
+    return response.body<T>();
+  }
+
+  /** GET that must succeed (2xx), returning the raw text. */
+  async getText(path: string, options?: RequestOptions): Promise<string> {
+    const response = await this.get(path, options);
+    response.expectStatusInRange(200, 299);
+    return response.text();
+  }
+
+  /** GET a file: returns the bytes (not corrupted by text decoding) and, when `saveTo` is given, writes them there (folders are created). */
+  async download(
+    path: string,
+    options: RequestOptions & { saveTo?: string } = {},
+  ): Promise<Buffer> {
+    const { saveTo, ...requestOptions } = options;
+    const response = await this.get(path, requestOptions);
+    response.expectStatusInRange(200, 299);
+    const bytes = await response.bytes();
+    if (saveTo) {
+      fs.mkdirSync(nodePath.dirname(nodePath.resolve(saveTo)), { recursive: true });
+      fs.writeFileSync(saveTo, bytes);
+      log.info(`Saved ${bytes.length} bytes to ${saveTo}`);
+    }
+    return bytes;
+  }
+
+  /** A GraphQL call: POSTs `{ query, variables, operationName }` as JSON (default endpoint /graphql). Check `response.expectNoGraphqlErrors()` - GraphQL reports failures with a 200. */
+  graphql(
+    query: string,
+    variables?: Record<string, unknown>,
+    options: RequestOptions & { operationName?: string; path?: string } = {},
+  ): Promise<ApiResponse> {
+    const { operationName, path, ...requestOptions } = options;
+    return this.post(path ?? '/graphql', {
+      ...requestOptions,
+      json: { query, variables, ...(operationName ? { operationName } : {}) },
+    });
+  }
+
+  /** A SOAP call: wraps `body` (the XML inside the Body element) in an envelope and sets Content-Type / SOAPAction for SOAP 1.1 (default) or 1.2. */
+  soap(
+    path: string,
+    options: RequestOptions & {
+      action: string;
+      body: string;
+      version?: '1.1' | '1.2';
+      headerXml?: string;
+    },
+  ): Promise<ApiResponse> {
+    const { action, body, version, headerXml, ...requestOptions } = options;
+    const v12 = version === '1.2';
+    const ns = v12
+      ? 'http://www.w3.org/2003/05/soap-envelope'
+      : 'http://schemas.xmlsoap.org/soap/envelope/';
+    const envelope = `<?xml version="1.0" encoding="UTF-8"?><soap:Envelope xmlns:soap="${ns}">${headerXml ? `<soap:Header>${headerXml}</soap:Header>` : ''}<soap:Body>${body}</soap:Body></soap:Envelope>`;
+    const headers: Record<string, string> = v12
+      ? { 'Content-Type': `application/soap+xml; charset=utf-8; action="${action}"` }
+      : { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: `"${action}"` };
+    return this.post(path, {
+      ...requestOptions,
+      headers: { ...headers, ...requestOptions.headers },
+      rawBody: envelope,
+    });
+  }
+
+  /**
+   * Repeats a request until `until(response)` is true - for the things an API does in the background. Returns the
+   * response that satisfied it; on timeout throws PollTimeoutError carrying the last response.
+   *
+   *   const done = await client.poll('GET', '/jobs/{id}', { pathParams: { id }, until: (r) => r.get('state') === 'DONE' });
+   */
+  poll(
+    method: HttpMethod,
+    path: string,
+    options: RequestOptions &
+      PollOptions & { until: (response: ApiResponse) => boolean | Promise<boolean> },
+  ): Promise<ApiResponse> {
+    const { until, timeoutMs, intervalsMs, description, ...requestOptions } = options;
+    return pollUntil(() => this.request(method, path, requestOptions), until, {
+      timeoutMs,
+      intervalsMs,
+      description: description ?? `${method} ${path}`,
+    });
+  }
+
+  /** Logs a one-line summary of every exchange so far (for debugging a flow from the console). */
+  logExchanges(): void {
+    for (const exchange of this.exchangeLog.entries) log.info(describeExchange(exchange));
+  }
+}
+
+/** The body as text, for providers that sign it. Multipart and binary bodies have no stable text form, so they sign as empty. */
+function bodyAsText(options: RequestOptions): string | undefined {
+  if (options.json !== undefined) return JSON.stringify(options.json);
+  if (options.xml !== undefined)
+    return typeof options.xml === 'string' ? options.xml : toXml(options.xml);
+  if (options.form)
+    return new URLSearchParams(
+      Object.entries(options.form).map(([k, v]): [string, string] => [k, String(v)]),
+    ).toString();
+  if (typeof options.rawBody === 'string') return options.rawBody;
+  return undefined;
+}
+
+function parseRetryAfter(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }
 
 function buildSearchParams(queryParams: Record<string, QueryValue>): URLSearchParams {

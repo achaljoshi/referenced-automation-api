@@ -2,6 +2,7 @@ import express, { type Express } from 'express';
 import multer from 'multer';
 import type { Server } from 'node:http';
 import { XMLParser } from 'fast-xml-parser';
+import { createHash, createHmac } from 'node:crypto';
 
 export interface TestServerHandle {
   app: Express;
@@ -156,6 +157,164 @@ export function startTestServer(): Promise<TestServerHandle> {
     const items = all.slice(cursor, cursor + pageSize);
     const next = cursor + pageSize < all.length ? cursor + pageSize : null;
     res.json({ items, next });
+  });
+
+  // ---- behaviours for retry, polling, downloads, GraphQL/SOAP, sessions and signed requests ----
+
+  const counters = new Map<string, number>();
+  const bump = (key: string) => {
+    const next = (counters.get(key) ?? 0) + 1;
+    counters.set(key, next);
+    return next;
+  };
+
+  // Answers 503 (with Retry-After: 0) until it has been asked `fail` times for the same key, then 200.
+  app.get('/flaky/:key', (req, res) => {
+    const calls = bump(`flaky:${req.params.key}`);
+    if (calls <= Number(req.query.fail ?? 2)) {
+      res.setHeader('Retry-After', '0');
+      return res.status(503).json({ error: 'try again', calls });
+    }
+    res.json({ ok: true, calls });
+  });
+
+  app.post('/flaky-post/:key', (req, res) => {
+    const calls = bump(`flaky-post:${req.params.key}`);
+    if (calls <= 1) return res.status(503).json({ error: 'try again', calls });
+    res
+      .status(201)
+      .json({ created: true, calls, idempotencyKey: req.headers['idempotency-key'] ?? null });
+  });
+
+  app.get('/always-503', (req, res) => {
+    bump('always-503');
+    res.status(503).json({ error: 'down' });
+  });
+
+  app.get('/calls/:key', (req, res) => {
+    res.json({ calls: counters.get(req.params.key) ?? 0 });
+  });
+
+  // A background job: PENDING for the first N reads, then DONE.
+  app.get('/jobs/:id', (req, res) => {
+    const reads = bump(`job:${req.params.id}`);
+    res.json({
+      id: req.params.id,
+      state: reads > Number(req.query.after ?? 2) ? 'DONE' : 'PENDING',
+      reads,
+    });
+  });
+
+  app.get('/download/bytes', (req, res) => {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="blob.bin"');
+    res.send(Buffer.from([0, 1, 2, 250, 251, 252, 253, 254, 255]));
+  });
+
+  app.post('/graphql', (req, res) => {
+    const { query, variables, operationName } = req.body as {
+      query?: string;
+      variables?: Record<string, unknown>;
+      operationName?: string;
+    };
+    if (!query || /broken/.test(query)) return res.json({ errors: [{ message: 'Syntax Error' }] });
+    res.json({
+      data: { echo: { query, variables: variables ?? null, operationName: operationName ?? null } },
+    });
+  });
+
+  app.post('/soap', (req, res) => {
+    const text = typeof req.body === 'string' ? req.body : '';
+    res.set('Content-Type', 'text/xml');
+    res.send(
+      `<?xml version="1.0"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><Echo><action>${String(req.headers.soapaction ?? '')}</action><contentType>${String(req.headers['content-type'] ?? '')}</contentType><length>${text.length}</length></Echo></soap:Body></soap:Envelope>`,
+    );
+  });
+
+  app.get('/cookies/set', (req, res) => {
+    res.setHeader('Set-Cookie', [
+      'session=abc123; Path=/; HttpOnly; Secure',
+      'theme=dark; Path=/; Max-Age=3600',
+    ]);
+    res.json({ set: true });
+  });
+
+  app.post('/session/login', (req, res) => {
+    if (req.body.username !== 'ada' || req.body.password !== 'lovelace')
+      return res.status(401).json({ error: 'bad login' });
+    res.setHeader('Set-Cookie', 'sid=session-token; Path=/; HttpOnly');
+    res.json({ loggedIn: true });
+  });
+
+  app.get('/protected/session', (req, res) => {
+    if (!String(req.headers.cookie ?? '').includes('sid=session-token'))
+      return res.status(401).json({ error: 'no session' });
+    res.json({ authenticated: true });
+  });
+
+  app.get('/protected/hmac', (req, res) => hmacCheck(req, res));
+  app.post('/protected/hmac', (req, res) => hmacCheck(req, res));
+
+  function hmacCheck(req: express.Request, res: express.Response) {
+    const timestamp = String(req.headers['x-timestamp'] ?? '');
+    const raw = req.method === 'GET' ? '' : JSON.stringify(req.body);
+    const canonical = `${timestamp}\n${req.method}\n${req.originalUrl}\n${createHash('sha256').update(raw).digest('hex')}`;
+    const expected = createHmac('sha256', 'hmac-secret').update(canonical).digest('hex');
+    if (req.headers['x-key-id'] !== 'key-1' || req.headers['x-signature'] !== expected)
+      return res.status(401).json({ error: 'bad signature' });
+    res.json({ authenticated: true });
+  }
+
+  app.get('/protected/jwt', (req, res) => {
+    const token = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const [header, payload, signature] = token.split('.');
+    const expected = createHmac('sha256', 'jwt-secret')
+      .update(`${header}.${payload}`)
+      .digest('base64url');
+    if (!header || !payload || signature !== expected)
+      return res.status(401).json({ error: 'bad token' });
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString()) as {
+      sub?: string;
+      exp: number;
+    };
+    if (claims.exp < Math.floor(Date.now() / 1000))
+      return res.status(401).json({ error: 'expired' });
+    res.json({ authenticated: true, sub: claims.sub });
+  });
+
+  app.post('/oauth/password-token', (req, res) => {
+    const body = req.body as Record<string, string>;
+    if (body.grant_type === 'refresh_token') {
+      if (body.refresh_token !== 'refresh-1')
+        return res.status(400).json({ error: 'invalid_grant' });
+      return res.json({
+        access_token: 'refreshed-token',
+        refresh_token: 'refresh-1',
+        expires_in: 3600,
+      });
+    }
+    if (body.username !== 'ada' || body.password !== 'lovelace')
+      return res.status(401).json({ error: 'invalid_grant' });
+    res.json({ access_token: 'password-token', refresh_token: 'refresh-1', expires_in: 1 });
+  });
+
+  app.get('/protected/oauth-password', (req, res) => {
+    const auth = req.headers.authorization;
+    if (auth !== 'Bearer password-token' && auth !== 'Bearer refreshed-token')
+      return res.status(401).json({ error: 'unauthorized' });
+    res.json({ authenticated: true, token: auth });
+  });
+
+  app.get('/redirect', (req, res) => {
+    res.redirect(302, '/users/1');
+  });
+
+  app.get('/echo-idempotency', (req, res) => {
+    res.json({ key: req.headers['idempotency-key'] ?? null });
+  });
+
+  app.get('/secrets-echo', (req, res) => {
+    res.json({ ok: true });
   });
 
   return new Promise((resolve) => {

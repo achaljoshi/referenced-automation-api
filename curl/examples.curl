@@ -1,0 +1,91 @@
+# Example curl file for api-curl-to-playwright: every command below becomes a test that uses this framework's
+# apiClient, auth classes and assertions. Put your own commands in a file like this, run
+#
+#   npx api-curl-to-playwright curl/examples.curl
+#
+# and the tests appear in tests/generated/. Lines that start "# key: value" with a known key say what to check;
+# any other comment (like this one) is ignored.
+
+# name: List users
+# expect: 200
+# expect-json: data[0].name = Ada Lovelace
+# expect-header: content-type ~ json
+# expect-max-ms: 5000
+# tag: @smoke
+curl 'https://api.example.com/users' -H 'accept: application/json'
+
+# name: Create a user
+# expect: 201
+# expect-json: name = Grace Hopper
+# expect-json: id
+curl -X POST 'https://api.example.com/users' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Grace Hopper","roles":["admin","reviewer"],"active":true,"address":{"city":"New York"}}'
+
+# name: Replace a user
+# expect-json: name = Replaced
+curl -X PUT 'https://api.example.com/users/5' -H 'Content-Type: application/json' --data-raw '{"name":"Replaced"}'
+
+# name: Search with query parameters
+# expect-json: query.q = lovelace
+# expect-json: query.tag = ["a","b"]
+curl -G 'https://api.example.com/search' --data-urlencode 'q=lovelace' -d 'tag=a' -d 'tag=b'
+
+# name: Submit a form
+# expect-json: received.username = ada
+curl 'https://api.example.com/form-echo' -d 'username=ada' -d 'plan=pro'
+
+# name: Upload a file
+# expect-json: file.originalname = fixture.txt
+curl 'https://api.example.com/upload' -F 'description=a fixture' -F 'file=@tests/support/fixture.txt;type=text/plain'
+
+# name: Basic auth (credentials come from API_USER / API_PASSWORD, never from this file)
+# expect-json: authenticated = true
+curl -u 'user:pass' 'https://api.example.com/protected/basic'
+
+# name: Bearer token (from API_TOKEN)
+# expect-json: authenticated = true
+curl 'https://api.example.com/protected/bearer' -H 'Authorization: Bearer expected-token'
+
+# name: API key header (from API_KEY)
+# expect-json: authenticated = true
+curl 'https://api.example.com/protected/apikey' -H 'X-API-Key: expected-key'
+
+# name: Wrong credentials are refused
+# secret: inline
+# expect: 401
+curl 'https://api.example.com/protected/bearer' -H 'Authorization: Bearer not-the-token'
+
+# name: Post XML
+# expect: 200
+# expect-header: content-type ~ xml
+curl -X POST 'https://api.example.com/xml-echo' -H 'Content-Type: application/xml' -d '<user><name>Ada</name></user>'
+
+# name: A redirect is not followed without -L
+# expect: 302
+# expect-header: location = /users/1
+curl 'https://api.example.com/redirect'
+
+# name: A redirect is followed with -L
+# expect-json: name = Ada Lovelace
+curl -L 'https://api.example.com/redirect'
+
+# name: Headers only
+# expect-header: x-total-count = 3
+curl -I 'https://api.example.com/users'
+
+# name: Not deployed yet
+# skip: the endpoint does not exist in this environment
+curl 'https://api.example.com/beta/feature'
+
+# flow: Read a user found in the list
+# name: Find the first user
+# save: firstId = data[0].id
+curl 'https://api.example.com/users'
+
+# name: Read that user
+# expect-json: name = Ada Lovelace
+# expect-json: id = 1
+curl 'https://api.example.com/users/{{firstId}}'
+
+# flow: end

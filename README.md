@@ -124,6 +124,92 @@ await page.goto('https://example.com/checkout'); // served entirely from the rec
 
 Matching during playback defaults to method + exact URL (including query string); pass `{ matchBy: 'url' }` to ignore method. A request inside the pattern with no matching recorded entry falls through to the real network by default (`route.fallback()`) - pass `onUnmatched` to handle that case yourself instead (e.g. fail the test loudly rather than silently hitting a real backend). Response bodies are stored base64-encoded, so binary responses (images, gzip) round-trip correctly.
 
+## Gherkin / BDD (`playwright-bdd` 9.2.1)
+
+Business-readable API tests, with the vocabulary in this package so every project uses the same sentences:
+
+```gherkin
+Scenario: Create a user and read it back
+  Given I am authenticated with the bearer token "{{env:API_TOKEN}}"
+  When I send a POST request to "/users" with JSON:
+    """
+    { "name": "{{random:first-name}}", "roles": ["admin"] }
+    """
+  Then the response status is 201
+  And I remember the response field "id" as "userId"
+  When I send a GET request to "/users/{{userId}}"
+  Then the response field "roles" contains "admin"
+```
+
+```ts
+// features/steps/steps.ts
+import { createBdd } from 'playwright-bdd';
+import { registerApiSteps, registerDataSteps } from '@automation/referenced-automation-api';
+import { test } from './fixtures';           // mergeTests(bddTest, apiTest) - see features/steps/fixtures.ts
+
+const { Given, When, Then } = createBdd(test);
+registerDataSteps({ Given, Then });          // variables, random data, dates, env
+registerApiSteps({ Given, When, Then });     // requests, auth, headers, bodies, assertions, polling
+```
+
+`npm test` runs `bddgen && playwright test`; `npm run test:bdd` only the features; `BDD_TAGS` is not needed - use `--grep @smoke`.
+Every string, docstring and table cell understands `{{placeholders}}` (saved values, `{{env:X|fallback}}`, `{{uuid}}`, `{{random:email}}`, `{{date:+7d}}`);
+an unresolvable one fails the step. The sample features in `features/` run against the in-process server in `tests/support/testServer.ts`.
+`registerDataSteps` is also in the UI package - when a project's features use both, register it once.
+
+## curl in, tests out (`api-curl-to-playwright`)
+
+There is no record-and-play for APIs, so give it the requests instead: any curl command from Postman, Chrome ("Copy as cURL"), API docs
+or a terminal, in a file, with optional `# key: value` lines saying what to check.
+
+```bash
+npx api-curl-to-playwright curl/examples.curl            # writes tests/generated/examples.spec.ts
+npx api-curl-to-playwright curl/ --out tests/api --flow   # a folder of curl files, each one a single flow
+pbpaste | npx api-curl-to-playwright - --stdout           # straight from the clipboard (macOS)
+```
+
+```bash
+# name: Create a user
+# expect: 201
+# expect-json: name = Ada
+# save: userId = id
+# flow: Onboarding
+curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -H 'Authorization: Bearer abc' -d '{"name":"Ada"}'
+```
+
+becomes
+
+```ts
+test('Create a user @api', async ({ apiClient }) => {
+  apiClient.setAuth(new BearerAuth(env.get('API_TOKEN')));          // the token is never written into the test
+  const response = await apiClient.post('/users', { json: { name: 'Ada' }, maxRedirects: 0 });
+  expect(response.status(), `Unexpected status; body: ${response.text().slice(0, 500)}`).toBe(201);
+  expect(response.get('name')).toBe('Ada');
+});
+```
+
+- Calls map onto the framework: `apiClient.get/post/...`, `queryParams`, `json` / `form` / `xml` / `multipart` / `rawBody`, `BearerAuth` / `BasicAuth` / `ApiKeyAuth`, `timeoutMs`; the host moves to `API_BASE_URL` (kept in full when the commands call several hosts, or with `--keep-host`).
+- **Secrets are never written**: anything named like a password, token, secret, api key, authorization or cookie - in a header, query, form field or JSON key, and `-u user:pass` - is read with `env.get('API_...')`; the command prints which variables to set. `--param 'accountNumber=ACCOUNT'` adds more; `# secret: inline` writes deliberately fake credentials (a wrong-password test) as they are.
+- Without `-L` curl does not follow redirects, so the test sets `maxRedirects: 0` (`--follow-redirects` changes that). `$VAR` / `${VAR}` in a command become environment reads. Browser-added headers (sec-fetch-*, user-agent, accept-language) are dropped unless `--keep-all-headers`.
+- Anything that could not be converted exactly is listed (`note:`), and `--strict` turns that into a failure. `toCurl(request)` goes the other way - a pasteable command from a request, credentials masked.
+
+`curl/examples.curl` is a worked example; `tests/generated/examples.spec.ts` is what it produces and runs in this repo's suite (a test fails if the committed file drifts from the converter's output).
+
+## Reusable helpers beyond the basics
+
+`docs/PLAYWRIGHT_COVERAGE.md` maps Playwright's own API-testing capabilities to this framework and lists what was added:
+
+```ts
+await client.get('/flaky', { retry: { attempts: 4 } });                          // 429/502/503/504 with backoff and Retry-After
+await client.post('/orders', { json, idempotencyKey: true, retry: { attempts: 3 } }); // safe to repeat
+const done = await client.poll('GET', '/jobs/{id}', { pathParams: { id }, until: (r) => r.get('state') === 'DONE' });
+await expect(response).toMatchJsonSubset({ name: 'Ada' });                       // extra matchers on an ApiResponse
+const admin = await apiFor({ auth: new BearerAuth(adminToken) });                // a client for another user
+cleanup.add('order', () => client.delete('/orders/{id}', { pathParams: { id } })); // undone after the test, newest first
+```
+
+A failed test attaches every call it made (credentials masked) as `api-exchanges.txt`; `response.exchange` and `toCurl()` reproduce one in a terminal.
+
 ## Correlation and logging
 
 The built-in `test` has an auto fixture that gives every test a correlation ID. `ApiClient` sends it as the `X-Correlation-Id` header on every request and logs each call (e.g. `GET /users/1 -> 200 (41ms) cid=ad9e928b` - query strings stripped, secrets redacted), so one failing test can be traced from the CI log into the API gateway's logs by grepping a single value. Use `CORRELATION_HEADER` to read the header name.

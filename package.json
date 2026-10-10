@@ -22,13 +22,15 @@
     "clean": "rimraf dist *.tgz",
     "lint": "eslint . --ext .ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "playwright test",
+    "test": "bddgen && playwright test",
+    "test:bdd": "bddgen && playwright test --project=bdd",
     "pretest": "npm run build",
     "prepack": "npm run build",
     "allure:generate": "allure generate allure-results --clean -o allure-report",
     "allure:open": "allure open allure-report",
     "allure:report": "npm run allure:generate && npm run allure:open",
-    "security": "automation-audit-gate && automation-scan-secrets"
+    "security": "automation-audit-gate && automation-scan-secrets",
+    "convert:curl": "node dist/cli/curlToTests.js"
   },
   "dependencies": {
     "@automation/referenced-automation-utils": "file:../shared-packages/automation-referenced-automation-utils-1.0.0.tgz",
@@ -52,7 +54,11 @@
     "allure-playwright": "^3.0.9",
     "eslint": "^8.57.1",
     "multer": "^2.0.1",
+    "playwright-bdd": "9.2.1",
     "rimraf": "^6.0.1",
     "typescript": "^5.7.3"
+  },
+  "bin": {
+    "api-curl-to-playwright": "./dist/cli/curlToTests.js"
   }
 }

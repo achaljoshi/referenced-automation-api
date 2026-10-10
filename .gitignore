@@ -47,3 +47,6 @@ out/
 .project
 .classpath
 .settings/
+
+# Tests generated from Gherkin features by bddgen
+.features-gen/
