@@ -51,5 +51,8 @@ out/
 # Tests generated from Gherkin features by bddgen
 .features-gen/
 
+# remote desktop mailbox: requests and responses (tokens in flight) - README "Calling the API from the remote desktop"
+.remote-mailbox/
+
 # fortnightly audit output (keep it between audits; see referenced-automation-utils docs/governance/AUDIT.md)
 audit-reports/

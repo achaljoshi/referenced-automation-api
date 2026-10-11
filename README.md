@@ -228,6 +228,46 @@ cleanup.add('order', () => client.delete('/orders/{id}', { pathParams: { id } })
 
 A failed test attaches every call it made as `api-exchanges.txt`; `response.exchange` and `toCurl()` reproduce one in a terminal. Credentials are masked in what is stored: header values (response `Set-Cookie` included), JSON / form / **XML** fields and elements by name (numbers too - `password: 123456`), query values and token-like URL path segments, and URLs in error messages. A call that needed the client's retry policy leaves an `api-retries` annotation on the test (`GET /flaky/x: 2 retries (503, 503, 200)`), so a green test that leaned on retries shows in the report.
 
+## Calling the API from the remote desktop
+
+> **Status: NOT VERIFIED on a real RDP host.** This was only tested against the stand-in agent from `@automation/referenced-automation-utils` (`testing.StandInAgent`, a Node program that speaks the same protocol over the same mailbox folder). The Windows parts - `mstsc`, the PowerShell agent, the redirected drive - have never run for this feature. The first run on a real host is the verification (`automation-remote doctor`, then `automation-remote check`).
+
+**What it is.** The tests run on a test machine (for example an AWS WorkSpace) where the UI app is reachable, but the APIs are reachable only from a remote Windows desktop host that you reach by RDP. With the remote host enabled, `ApiClient` sends each HTTP call through `remote.RemoteHost.http()`: the request is written as a file into a mailbox folder that is redirected into the RDP session, an agent there makes the call and writes the answer back. Auth providers (bearer, API key, OAuth2 token calls ...), retries, polling, pagination, the correlation id header and the masked exchange log work unchanged.
+
+**Keys** (`.env.<env>`; secrets only in `.env.<env>.local`):
+
+| Key | Meaning |
+|---|---|
+| `REMOTE_*` (`REMOTE_ENABLED=true`, `REMOTE_RDP_HOST`, `REMOTE_RDP_USER`, `REMOTE_RDP_PASSWORD`, `REMOTE_ALLOW` ...) | The RDP host and the agent: documented in utils, [docs/REMOTE_DESKTOP.md](../referenced-automation-utils/docs/REMOTE_DESKTOP.md). `REMOTE_ALLOW` must include `http` (it does by default). |
+| `REMOTE_API_BASE_URL` | The API's base URL **as seen from the remote host** (it may differ from the one the test machine uses). Falls back to `API_BASE_URL`. |
+| `API_VIA_REMOTE` | `true`: the `apiClient` and `apiFor` fixtures call from the remote host. Default `false`. |
+
+**An explicit remote client** (the normal `apiClient` stays local):
+
+```ts
+import { test, expect } from '@automation/referenced-automation-api';
+
+test('the order API answers on the internal network', async ({ remoteApiClient }) => {
+  const response = await remoteApiClient.get('/orders/{id}', { pathParams: { id: 42 } });
+  expect(response).toHaveStatus(200);
+  expect(response.get('status')).toBe('SHIPPED');
+});
+```
+
+`remoteApiClient` fails with a message naming the `REMOTE_*` keys when `REMOTE_ENABLED` is not `true`. The `remoteHost` fixture (worker-scoped, closed when the worker ends) gives the `RemoteHost` itself, or `undefined` when the remote host is off, for DB or other steps next to the API calls. Without the fixtures: `new ApiClient(new RemoteRequestContext(host, { baseURL }).asApiRequestContext(), baseUrl)`.
+
+**BDD features and generated tests need no change**: run them with `API_VIA_REMOTE=true` and every step that uses `apiClient` calls from the remote host. (The sample features in this repo override `apiClient` to hit an in-process server; your own project does not.)
+
+**Failures name the remote operation**: `remote host operation "http" ...` with `AGENT_STALE` (the RDP session or agent is gone), `TIMEOUT`, or `DENIED` (`REMOTE_ALLOW must include http`); the error has a `code` and the original `RemoteError` as `cause`.
+
+**Limits**
+- No multipart/file uploads, `storageState`, client certificates or `httpCredentials` on the remote path: they throw an error that says to run that call from the test machine (use the normal `apiClient`, or `apiFor` without `API_VIA_REMOTE`).
+- Request and response bodies cross the mailbox as files (base64 inside JSON) and every request waits for a poll cycle (about 0.2-0.5 s). Keep JSON/text bodies modest; do not download large files this way.
+- The agent handles one request at a time, so parallel calls queue; use few workers.
+- `maxRedirects: 0` returns the 3xx itself; any other value follows redirects (the agent cannot cap their number). The host's proxy is not used. A repeated `Set-Cookie` crosses as one joined header and is split again, which is best effort.
+- Tokens and headers in flight are readable in the mailbox folder (`.remote-mailbox/`, git-ignored) on the test machine: keep it in a folder only the test user can read.
+- Details of the transport, security trade-offs and troubleshooting: utils `docs/REMOTE_DESKTOP.md`.
+
 ## Correlation and logging
 
 The built-in `test` has an auto fixture that gives every test a correlation ID. `ApiClient` sends it as the `X-Correlation-Id` header on every request and logs each call (e.g. `GET /users/1 -> 200 (41ms) cid=ad9e928b` - query strings stripped, secrets redacted), so one failing test can be traced from the CI log into the API gateway's logs by grepping a single value. Use `CORRELATION_HEADER` to read the header name.

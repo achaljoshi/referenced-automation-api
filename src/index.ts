@@ -21,7 +21,13 @@ export { subsetDifferences, maskFields } from './client/subset';
 export { pollUntil, mapConcurrent, PollTimeoutError } from './util/poll';
 export type { PollOptions } from './util/poll';
 export { CleanupRegistry } from './fixtures/cleanup';
-export type { ApiForOptions } from './fixtures/apiFixtures';
+export type { ApiForOptions, ApiFixtures, ApiWorkerFixtures } from './fixtures/apiFixtures';
+export {
+  RemoteRequestContext,
+  RemoteApiResponse,
+  RemoteRequestError,
+} from './remote/remoteRequestContext';
+export type { RemoteRequestContextOptions, RemoteFetchOptions } from './remote/remoteRequestContext';
 export * as curl from './curl';
 export { toCurl } from './curl/toCurl';
 export type { CurlRequest } from './curl/toCurl';
