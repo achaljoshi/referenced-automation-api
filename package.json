@@ -19,7 +19,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "clean": "rimraf dist *.tgz",
+    "clean": "rimraf --glob dist \"*.tgz\"",
     "lint": "eslint . --ext .ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bddgen && playwright test",
