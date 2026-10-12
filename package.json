@@ -32,7 +32,8 @@
     "security": "automation-audit-gate --allow-unassigned && automation-scan-secrets",
     "audit": "automation-framework-audit --run",
     "audit:quick": "automation-framework-audit",
-    "convert:curl": "node dist/cli/curlToTests.js"
+    "convert:curl": "node dist/cli/curlToTests.js",
+    "curl-to-tests": "node dist/cli/curlToTests.js"
   },
   "dependencies": {
     "@automation/referenced-automation-utils": "^1.0.0",

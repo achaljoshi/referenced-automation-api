@@ -3,7 +3,7 @@ REM ============================================================================
 REM Publishes this package to the npm registry in NPM_REGISTRY_URL, at the version in package.json. Other repos then
 REM get it by version: they list "@automation/referenced-automation-api": "^<version>" in package.json.
 REM
-REM Usage: scripts\publish-package.bat [--dry-run]
+REM Usage: .\scripts\publish-package.bat [--dry-run]   (PowerShell needs the .\ ; cmd.exe also accepts scripts\publish-package.bat)
 REM
 REM Before publishing:
 REM   - bump the version (a version can be published only once):  npm version patch^|minor^|major
@@ -17,6 +17,8 @@ cd /d "%~dp0\.."
 
 if not defined NPM_REGISTRY_URL (
   echo ERROR: set NPM_REGISTRY_URL to your organisation's npm registry URL, then run this again. 1>&2
+  echo   PowerShell:  $env:NPM_REGISTRY_URL = "YOUR_REGISTRY_URL" 1>&2
+  echo   cmd.exe:     set NPM_REGISTRY_URL=YOUR_REGISTRY_URL 1>&2
   exit /b 1
 )
 call npm config set registry "%NPM_REGISTRY_URL%"

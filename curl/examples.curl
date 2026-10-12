@@ -1,9 +1,9 @@
 # Example curl file for api-curl-to-playwright: every command below becomes a test that uses this framework's
-# apiClient, auth classes and assertions. Put your own commands in a file like this, run
-#
-#   npx api-curl-to-playwright curl/examples.curl
-#
-# and the tests appear in tests/generated/. Lines that start "# key: value" with a known key say what to check;
+# apiClient, auth classes and assertions. Put your own commands in a file like this and run, inside this repo:
+#   npm run curl-to-tests -- curl/examples.curl     (after `npm run build`; the same in bash and PowerShell)
+# or `node dist/cli/curlToTests.js curl/examples.curl`; a project that depends on this package runs
+# `npx api-curl-to-playwright curl/examples.curl` instead. The tests appear in tests/generated/.
+# Lines that start "# key: value" with a known key say what to check;
 # any other comment (like this one) is ignored.
 
 # name: List users

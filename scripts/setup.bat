@@ -7,12 +7,13 @@ REM versions are the ones in package.json. To pick up a newer version of a packa
 REM `npm install` (README: Upgrading a package).
 REM
 REM Without these packages in a registry yet - or to try a change you have not published - use local mode:
-REM   scripts\setup.bat --local
+REM   .\scripts\setup.bat --local
 REM It builds the sibling repos this one depends on (referenced-automation-utils), keeps their .tgz
 REM files in ..\shared-packages and installs those instead. Nothing in package.json or package-lock.json changes. The
 REM sibling repos must be checked out next to this one. (USE_LOCAL_PACKAGES=1 does the same.)
 REM
-REM Usage: scripts\setup.bat [--local]
+REM Usage: .\scripts\setup.bat [--local]   (PowerShell needs the .\ ; plain scripts\setup.bat works only in cmd.exe)
+REM        Set the registry first: PowerShell  $env:NPM_REGISTRY_URL = "YOUR_REGISTRY_URL"   cmd.exe  set NPM_REGISTRY_URL=YOUR_REGISTRY_URL
 REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0\.."
@@ -46,7 +47,7 @@ if "%LOCAL%"=="1" (
   if errorlevel 1 (
     echo. 1>&2
     echo npm ci failed. If it stopped on an @automation\* package, that version is not in the registry yet: 1>&2
-    echo publish it ^(see the README: Publishing a package^) or run scripts\setup.bat --local. 1>&2
+    echo publish it ^(see the README: Publishing a package^) or run .\scripts\setup.bat --local. 1>&2
     exit /b 1
   )
 )

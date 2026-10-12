@@ -5,8 +5,12 @@ import { convertCurl, type ParamRule } from '../curl';
 
 const USAGE = `api-curl-to-playwright - turn curl commands into Playwright API tests that use this framework
 
-Usage:
-  api-curl-to-playwright <file.curl | folder | -> [options]
+Usage, inside this repo (a package's own bin is not on its own PATH; build first with \`npm run build\`):
+  npm run curl-to-tests -- <file.curl | folder | -> [options]
+  node dist/cli/curlToTests.js <file.curl | folder | -> [options]
+
+  From a project that depends on this package:
+  npx api-curl-to-playwright <file.curl | folder | -> [options]
 
   A curl file holds any number of curl commands (copy them from Postman, Chrome "Copy as cURL", API docs, a terminal).
   Put "# key: value" comment lines above a command to say what to check:

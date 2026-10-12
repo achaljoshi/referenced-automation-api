@@ -4,13 +4,13 @@ REM Builds this package and produces a versioned .tgz - the exact file `npm publ
 REM version in package.json: automation-referenced-automation-api-<version>.tgz
 REM
 REM Two ways to use it:
-REM   1. Publish it to the registry:  scripts\publish-package.bat
+REM   1. Publish it to the registry:  .\scripts\publish-package.bat
 REM      Other repos then get it BY VERSION from their package.json (README: Publishing a package).
 REM   2. Keep it local: put the .tgz where the consuming repo can see it and install it there with
 REM      `npm install --no-save <file>.tgz` (README: Using a package without a registry) - or run
-REM      scripts\setup.bat --local in the consumer, which builds and installs every @automation dependency this way.
+REM      .\scripts\setup.bat --local in the consumer, which builds and installs every @automation dependency this way.
 REM
-REM Usage: scripts\create-package.bat [--local] [output-dir]
+REM Usage: .\scripts\create-package.bat [--local] [output-dir]   (PowerShell needs the .\ ; cmd.exe also accepts scripts\create-package.bat)
 REM   --local     build against the sibling @automation packages in ..\shared-packages instead of the registry
 REM   output-dir  default ..\shared-packages (sibling to this repo)
 REM ============================================================================
@@ -31,7 +31,7 @@ if defined NPM_REGISTRY_URL call npm config set registry "%NPM_REGISTRY_URL%"
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
 
 if "%LOCAL%"=="1" (
-  REM The packages this one depends on come from ..\shared-packages instead of the registry (see scripts\setup.bat).
+  REM The packages this one depends on come from ..\shared-packages instead of the registry (see .\scripts\setup.bat).
   set "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1"
   call scripts\setup.bat --local
   if errorlevel 1 exit /b 1
@@ -54,7 +54,7 @@ move /y "%TARBALL%" "%OUT_DIR%\" >nul
 
 echo.
 echo Package written to: %OUT_DIR%\%TARBALL%
-echo Publish it:             scripts\publish-package.bat
+echo Publish it:             .\scripts\publish-package.bat
 echo Or install it locally:  npm install --no-save %OUT_DIR%\%TARBALL%
 endlocal
 exit /b 0
