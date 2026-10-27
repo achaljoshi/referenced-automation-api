@@ -46,6 +46,8 @@ test('gets a user', async ({ apiClient }) => {
 });
 ```
 
+**Setup stops with a certificate error** (`self-signed certificate in certificate chain`, `unable to get local issuer certificate`)? A company proxy that re-signs HTTPS with its own root certificate is the usual cause. `setup` checks for it first (`scripts/check-tls.js`: the npm registry and, where browsers are installed, the Playwright download host) and prints the exact fix: give Node the company root CA certificate (a `.pem` file from IT) through `NODE_EXTRA_CA_CERTS`, or on Node 22.15 or newer let it read the operating system's certificate store with `NODE_OPTIONS=--use-system-ca`. Do not work around it with `NODE_TLS_REJECT_UNAUTHORIZED=0`: that turns certificate checking off for every Node program started from that shell, npm included. The check connects directly from this machine; it does not use a proxy setting, so a machine that can only reach the registry through a proxy shows "could not connect" and setup carries on.
+
 ## Windows first run
 
 Everything below is PowerShell, started in the folder this repo is checked out in (`cd C:\Projects\referenced-automation-api`). Pure API tests need no browser; the few tests that use a Playwright `page` (`tests/mock/routeMock.spec.ts`, `tests/mock/recorder.spec.ts`) need Chromium once.
@@ -578,6 +580,8 @@ When you are done experimenting, run `npm ci` to go back to what the registry pr
 ## IDE setup
 
 Same as `referenced-automation-utils`: VS Code prompts for the recommended extensions on open; IntelliJ/WebStorm ships ESLint/Prettier wired in plus an `npm: test` run configuration. No plugin installs needed for either IDE.
+
+**Gherkin step navigation (VS Code).** Ctrl/Cmd-click on a step in a `.feature` file opens its definition when the official *Cucumber* extension (`cucumberopen.cucumber-official`, recommended when you open the folder) knows where the steps are. `.vscode/settings.json` tells it (`cucumber.glue`): this repo's `features/steps` and the shared vocabulary in `src/bdd`. Without that setting the extension reads only `features/`, so the shared steps ("I click the button ...") show as undefined and do not open anything. If *Cucumber (Gherkin) Full Support* (`alexkrechik.cucumberautocomplete`) is also installed, disable it for this workspace so the two do not both answer. Run `npm ci` first (the packaged steps are read from `node_modules`) and reload the window once after changing the setting.
 
 ## Testing this package itself
 
