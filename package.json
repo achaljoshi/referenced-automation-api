@@ -36,7 +36,7 @@
     "curl-to-tests": "node dist/cli/curlToTests.js"
   },
   "dependencies": {
-    "@automation/referenced-automation-utils": "^1.0.0",
+    "@automation/referenced-automation-utils": "^1.0.1",
     "express": "^4.21.2",
     "fast-xml-parser": "^5.11.0"
   },
