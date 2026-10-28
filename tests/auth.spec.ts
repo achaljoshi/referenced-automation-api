@@ -7,7 +7,6 @@ import {
   BasicAuth,
   OAuth2ClientCredentials,
   OAuth2PasswordAuth,
-  SessionCookieAuth,
 } from '../src/auth/authProvider';
 import { startTestServer, stopTestServer, type TestServerHandle } from './support/testServer';
 
@@ -24,76 +23,6 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await context.dispose();
   await stopTestServer(server);
-});
-
-async function calls(key: string): Promise<number> {
-  const response = await context.get(`${server.baseUrl}/calls/${key}`);
-  return ((await response.json()) as { calls: number }).calls;
-}
-
-test.describe('token acquisition is single-flight @regression', () => {
-  test('parallel first requests share ONE token request (client credentials)', async () => {
-    const id = tenant();
-    const client = new ApiClient(context, server.baseUrl).setAuth(
-      new OAuth2ClientCredentials({
-        tokenUrl: `${server.baseUrl}/oauth/token-counted?tenant=${id}`,
-        clientId: 'client',
-        clientSecret: 'secret',
-      }),
-    );
-    const responses = await Promise.all(
-      Array.from({ length: 8 }, () => client.get('/protected/oauth')),
-    );
-    expect(responses.map((r) => r.status())).toEqual(Array(8).fill(200));
-    expect(await calls(`token:${id}`)).toBe(1);
-  });
-
-  test('parallel requests on an expired token do not race a rotating refresh token', async () => {
-    const id = tenant();
-    const client = new ApiClient(context, server.baseUrl).setAuth(
-      new OAuth2PasswordAuth({
-        tokenUrl: `${server.baseUrl}/oauth/rotating-token?tenant=${id}`,
-        username: 'ada',
-        password: 'lovelace',
-        refreshSkewSeconds: 0,
-      }),
-    );
-    expect((await client.get('/protected/rotating')).status()).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 1100)); // the 1 s access token expires
-    const responses = await Promise.all(
-      Array.from({ length: 6 }, () => client.get('/protected/rotating')),
-    );
-    expect(responses.map((r) => r.status())).toEqual(Array(6).fill(200));
-    // one login, then ONE refresh: without single-flight the other five refreshes fail (the token is single-use) and each logs in again
-    expect(await calls(`rot:${id}:password`)).toBe(1);
-    expect(await calls(`rot:${id}:refresh`)).toBe(1);
-  });
-
-  test('parallel first requests share one login (session cookie)', async () => {
-    const id = tenant();
-    const client = new ApiClient(context, server.baseUrl).setAuth(
-      new SessionCookieAuth({
-        loginUrl: `${server.baseUrl}/session/login-counted?tenant=${id}`,
-        credentials: { username: 'ada', password: 'lovelace' },
-      }),
-    );
-    const responses = await Promise.all(
-      Array.from({ length: 5 }, () => client.get(`/protected/session-counted?tenant=${id}`)),
-    );
-    expect(responses.map((r) => r.status())).toEqual(Array(5).fill(200));
-    expect(await calls(`login:${id}`)).toBe(1);
-  });
-
-  test('a token is fetched again after a failure (the failed attempt is not cached)', async () => {
-    const wrong = new OAuth2ClientCredentials({
-      tokenUrl: `${server.baseUrl}/oauth/token-counted?tenant=${tenant()}`,
-      clientId: 'client',
-      clientSecret: 'WRONG',
-    });
-    const client = new ApiClient(context, server.baseUrl).setAuth(wrong);
-    await expect(client.get('/protected/oauth')).rejects.toThrow(/token request failed: 401/);
-    await expect(client.get('/protected/oauth')).rejects.toThrow(/token request failed: 401/);
-  });
 });
 
 test.describe('the identity-provider call goes through the client @regression', () => {
@@ -192,22 +121,6 @@ test.describe('the identity-provider call goes through the client @regression', 
 });
 
 test.describe('failures do not echo what the identity provider said @regression', () => {
-  test('only the standard error fields are shown, with credentials masked', async () => {
-    const client = new ApiClient(context, server.baseUrl).setAuth(
-      new OAuth2ClientCredentials({
-        tokenUrl: `${server.baseUrl}/oauth/token-error`,
-        clientId: 'client',
-        clientSecret: 'sup3r-s3cret-value',
-      }),
-    );
-    const error = await client.get('/protected/oauth').catch((e: Error) => e);
-    const message = (error as Error).message;
-    expect(message).toMatch(/token request failed: 400 \(invalid_client: client secret \[REDACTED\] is not valid\)/);
-    expect(message).not.toContain('sup3r-s3cret-value');
-    expect(message).not.toContain('debug');
-    expect(message).not.toContain('received');
-  });
-
   test('a non-JSON error body (an HTML gateway page) is not repeated at all', async () => {
     const provider = new OAuth2PasswordAuth({
       tokenUrl: `${server.baseUrl}/oauth/token-html`,
@@ -216,18 +129,6 @@ test.describe('failures do not echo what the identity provider said @regression'
     });
     const error = await provider.apply({ headers: {}, queryParams: {} }).catch((e: Error) => e);
     expect((error as Error).message).toBe('OAuth2 password grant failed: 502');
-  });
-
-  test('a failed login does not repeat the credentials it was sent', async () => {
-    const client = new ApiClient(context, server.baseUrl).setAuth(
-      new SessionCookieAuth({
-        loginUrl: `${server.baseUrl}/session/login-counted?tenant=${tenant()}`,
-        credentials: { username: 'ada', password: 'wrong-pw-xyz' },
-      }),
-    );
-    const error = await client.get('/protected/session-counted').catch((e: Error) => e);
-    expect((error as Error).message).toBe('Session login failed: 401 (bad login)');
-    expect((error as Error).message).not.toContain('wrong-pw-xyz');
   });
 
   test('a token response with no access_token is an error, not a cached "undefined"', async () => {
@@ -240,36 +141,7 @@ test.describe('failures do not echo what the identity provider said @regression'
   });
 });
 
-test.describe('a session that expired logs in again, once @regression', () => {
-  test('401 -> new login -> the same request succeeds', async () => {
-    const id = tenant();
-    const client = new ApiClient(context, server.baseUrl).setAuth(
-      new SessionCookieAuth({
-        loginUrl: `${server.baseUrl}/session/login-counted?tenant=${id}`,
-        credentials: { username: 'ada', password: 'lovelace' },
-      }),
-    );
-    expect((await client.get(`/protected/session-counted?tenant=${id}`)).get('sid')).toBe('s1');
-    await context.get(`${server.baseUrl}/session/expire?tenant=${id}`);
-    const again = await client.get(`/protected/session-counted?tenant=${id}`);
-    expect(again.status()).toBe(200);
-    expect(again.get('sid')).toBe('s2');
-    expect(await calls(`login:${id}`)).toBe(2);
-  });
-
-  test('a request that is still 401 after the new login is returned as the 401 (no loop)', async () => {
-    const id = tenant();
-    const client = new ApiClient(context, server.baseUrl).setAuth(
-      new SessionCookieAuth({
-        loginUrl: `${server.baseUrl}/session/login-counted?tenant=${id}`,
-        credentials: { username: 'ada', password: 'lovelace' },
-      }),
-    );
-    const response = await client.get('/protected/basic'); // never accepts a cookie
-    expect(response.status()).toBe(401);
-    expect(await calls(`login:${id}`)).toBe(2); // the first login and exactly one more
-  });
-
+test.describe('a provider that cannot log in again is not retried on 401 @regression', () => {
   test('providers without reauthenticate (Basic) are not retried on 401', async () => {
     const client = new ApiClient(context, server.baseUrl).setAuth(new BasicAuth('user', 'WRONG'));
     expect((await client.get('/protected/basic')).status()).toBe(401);

@@ -12,16 +12,19 @@ Feature: Authentication
     Given I am authenticated as "user" with the password "pass"
     When I send a GET request to "/protected/basic"
     Then the response status is 200
+    And the response field "authenticated" is true
 
   Scenario: An API key in a header
     Given I use the API key "expected-key" in the header "X-API-Key"
     When I send a GET request to "/protected/apikey"
     Then the response status is 200
+    And the response field "authenticated" is true
 
   Scenario: An API key in the query string
     Given I set the query parameter "apiKey" to "expected-key"
     When I send a GET request to "/protected/apikey"
     Then the response status is 200
+    And the response field "authenticated" is true
 
   Scenario: Credentials are refused when they are wrong or missing
     When I send a GET request to "/protected/bearer"

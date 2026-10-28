@@ -18,19 +18,13 @@
     },
     {
       "rule": "sleep-promise",
-      "path": "tests/auth.spec.ts",
+      "path": "features/steps/auth.ts",
       "reason": "real time must pass for a 1 s access token to expire; elapsed time is the thing under test"
     },
     {
       "rule": "test-skipped",
       "path": "tests/generated/examples.spec.ts",
       "reason": "generated example showing how the curl converter marks a not-yet-deployed endpoint"
-    },
-    {
-      "rule": "assert-weak-throw",
-      "path": "tests/apiAdvanced.spec.ts",
-      "reason": "negative control: the point is that the call must not succeed; assert the error message instead of any error (to do)",
-      "expires": "2027-01-31"
     }
   ]
 }

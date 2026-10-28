@@ -41,15 +41,8 @@ test.describe('expectNoGraphqlErrors needs a real GraphQL response @regression',
   });
 });
 
+// The same behaviour as a person sees it (a response's XML values, leading zeros and attributes) is in features/request-bodies.feature.
 test.describe('XML values stay text @regression', () => {
-  test('leading zeros, a plus sign and attributes are kept (they used to become 123, 4412 and 7)', async () => {
-    const response = await client.get('/xml-ids');
-    expect(response.get('order.ref')).toBe('00123');
-    expect(response.get('order.phone')).toBe('+4412');
-    expect(response.get('order.qty')).toBe('7'); // text like every other XML value: compare with '7', or convert it yourself
-    expect(response.get('order.@_id')).toBe('007');
-  });
-
   test('fromXml keeps the text of every value', () => {
     expect(fromXml('<a><n>1</n><b>true</b><z>0042</z></a>')).toEqual({
       a: { n: '1', b: 'true', z: '0042' },

@@ -1,8 +1,6 @@
 import { test, expect, request as playwrightRequest, type APIRequestContext } from '@playwright/test';
-import * as path from 'node:path';
 import { ApiClient } from '../src/client/apiClient';
-import { BasicAuth, BearerAuth, ApiKeyAuth, OAuth2ClientCredentials } from '../src/auth/authProvider';
-import { paginateByPageNumber, paginateByCursor } from '../src/pagination/paginate';
+import { BearerAuth } from '../src/auth/authProvider';
 import { startTestServer, stopTestServer, type TestServerHandle } from './support/testServer';
 
 let server: TestServerHandle;
@@ -20,56 +18,9 @@ test.afterAll(async () => {
   await stopTestServer(server);
 });
 
-test.describe('HTTP methods', () => {
-  test('GET returns a traversable JSON body', async () => {
-    const response = await client.get('/users');
-    expect(response.status()).toBe(200);
-    expect(response.get('data[0].name')).toBe('Ada Lovelace');
-    expect(response.get('data[2].email')).toBe('katherine@example.com');
-  });
-
-  test('POST sends a JSON body and returns the created resource', async () => {
-    const response = await client.post('/users', { json: { name: 'New User' } });
-    expect(response.status()).toBe(201);
-    expect(response.get('name')).toBe('New User');
-    expect(response.get('id')).toBe(999);
-  });
-
-  test('PUT replaces a resource', async () => {
-    const response = await client.put('/users/{id}', {
-      pathParams: { id: 5 },
-      json: { name: 'Replaced' },
-    });
-    expect(response.get('id')).toBe(5);
-    expect(response.get('name')).toBe('Replaced');
-  });
-
-  test('PATCH partially updates a resource', async () => {
-    const response = await client.patch('/users/{id}', {
-      pathParams: { id: 5 },
-      json: { name: 'Patched' },
-    });
-    expect(response.get('patched')).toBe(true);
-    expect(response.get('name')).toBe('Patched');
-  });
-
-  test('DELETE returns 204', async () => {
-    const response = await client.delete('/users/{id}', { pathParams: { id: 5 } });
-    expect(response.status()).toBe(204);
-  });
-
-  test('HEAD returns headers with no body', async () => {
-    const response = await client.head('/users');
-    expect(response.status()).toBe(200);
-    expect(response.header('x-total-count')).toBe('3');
-  });
-
-  test('OPTIONS reports allowed methods', async () => {
-    const response = await client.options('/users');
-    expect(response.header('allow')).toContain('POST');
-  });
-});
-
+// What stays here is the ApiClient's own API (header get/remove, array query values, {path} parameters, an XML body built
+// from an object, in-memory multipart, response helpers, a token supplier function, the correlation id). The requests a
+// person recognises (each method, forms, XML, uploads, authentication, pagination) are in features/ - see the README.
 test.describe('headers CRUD', () => {
   test('default headers persist across calls and can be read/removed', async () => {
     const scoped = new ApiClient(context, server.baseUrl);
@@ -119,11 +70,6 @@ test.describe('request body formats', () => {
     expect(response.get('echo.received')).toContain('Ada');
   });
 
-  test('form body is sent as application/x-www-form-urlencoded', async () => {
-    const response = await client.post('/form-echo', { form: { username: 'ada', active: 'true' } });
-    expect(response.get('received.username')).toBe('ada');
-  });
-
   test('multipart body sends fields and a file together', async () => {
     const response = await client.post('/upload', {
       multipart: {
@@ -138,14 +84,6 @@ test.describe('request body formats', () => {
     expect(response.get('fields.description')).toBe('a test file');
     expect(response.get('file.originalname')).toBe('hello.txt');
     expect(response.get('file.size')).toBe(11);
-  });
-
-  test('multipart body accepts a real file path', async () => {
-    const filePath = path.join(__dirname, 'support', 'fixture.txt');
-    const response = await client.post('/upload', {
-      multipart: { file: { fileName: 'fixture.txt', filePath } },
-    });
-    expect(response.get('file.originalname')).toBe('fixture.txt');
   });
 });
 
@@ -169,101 +107,12 @@ test.describe('response validation', () => {
 });
 
 test.describe('auth strategies', () => {
-  test('BasicAuth authenticates', async () => {
-    const scoped = new ApiClient(context, server.baseUrl).setAuth(new BasicAuth('user', 'pass'));
-    const response = await scoped.get('/protected/basic');
-    expect(response.get('authenticated')).toBe(true);
-  });
-
-  test('BearerAuth authenticates with a static token', async () => {
-    const scoped = new ApiClient(context, server.baseUrl).setAuth(new BearerAuth('expected-token'));
-    const response = await scoped.get('/protected/bearer');
-    expect(response.get('authenticated')).toBe(true);
-  });
-
   test('BearerAuth authenticates with a token supplier function', async () => {
     const scoped = new ApiClient(context, server.baseUrl).setAuth(
       new BearerAuth(() => 'expected-token'),
     );
     const response = await scoped.get('/protected/bearer');
     expect(response.get('authenticated')).toBe(true);
-  });
-
-  test('ApiKeyAuth via header', async () => {
-    const scoped = new ApiClient(context, server.baseUrl).setAuth(
-      new ApiKeyAuth('X-Api-Key', 'expected-key', 'header'),
-    );
-    const response = await scoped.get('/protected/apikey');
-    expect(response.get('authenticated')).toBe(true);
-  });
-
-  test('ApiKeyAuth via query param', async () => {
-    const scoped = new ApiClient(context, server.baseUrl).setAuth(
-      new ApiKeyAuth('apiKey', 'expected-key', 'query'),
-    );
-    const response = await scoped.get('/protected/apikey');
-    expect(response.get('authenticated')).toBe(true);
-  });
-
-  test('wrong credentials are rejected', async () => {
-    const scoped = new ApiClient(context, server.baseUrl).setAuth(new BasicAuth('user', 'WRONG'));
-    const response = await scoped.get('/protected/basic');
-    expect(response.status()).toBe(401);
-  });
-
-  test('OAuth2ClientCredentials fetches a token once and reuses it', async () => {
-    // a tenant key makes the token endpoint count THIS test's token requests (GET /calls/<key>)
-    const tenant = `reuse-${Date.now()}`;
-    const scoped = new ApiClient(context, server.baseUrl).setAuth(
-      new OAuth2ClientCredentials({
-        tokenUrl: `${server.baseUrl}/oauth/token-counted?tenant=${tenant}`,
-        clientId: 'client',
-        clientSecret: 'secret',
-      }),
-    );
-    const tokenRequests = async () =>
-      ((await (await context.get(`${server.baseUrl}/calls/token:${tenant}`)).json()) as { calls: number }).calls;
-    expect(await tokenRequests()).toBe(0);
-    const first = await scoped.get('/protected/oauth');
-    const second = await scoped.get('/protected/oauth');
-    const third = await scoped.get('/protected/oauth');
-    expect([first, second, third].map((r) => r.get('authenticated'))).toEqual([true, true, true]);
-    expect(await tokenRequests()).toBe(1); // three API calls, one token request
-  });
-
-  test('a new OAuth2ClientCredentials provider fetches its own token (the count above is per provider)', async () => {
-    const tenant = `own-${Date.now()}`;
-    const make = () =>
-      new ApiClient(context, server.baseUrl).setAuth(
-        new OAuth2ClientCredentials({
-          tokenUrl: `${server.baseUrl}/oauth/token-counted?tenant=${tenant}`,
-          clientId: 'client',
-          clientSecret: 'secret',
-        }),
-      );
-    await make().get('/protected/oauth');
-    await make().get('/protected/oauth');
-    const calls = (await (await context.get(`${server.baseUrl}/calls/token:${tenant}`)).json()) as { calls: number };
-    expect(calls.calls).toBe(2);
-  });
-});
-
-test.describe('pagination', () => {
-  test('paginateByPageNumber collects every page', async () => {
-    const items = await paginateByPageNumber(client, '/page-items', {
-      itemsPath: 'items',
-      pageSize: { param: 'pageSize', size: 2 },
-      stopWhenFewerThan: 2,
-    });
-    expect(items).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]);
-  });
-
-  test('paginateByCursor follows next cursors to the end', async () => {
-    const items = await paginateByCursor(client, '/cursor-items', {
-      itemsPath: 'items',
-      nextCursorPath: 'next',
-    });
-    expect(items).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]);
   });
 });
 

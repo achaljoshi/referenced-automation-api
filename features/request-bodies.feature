@@ -53,3 +53,10 @@ Feature: Request bodies and parameters
   Scenario: A raw body
     When I send a POST request to "/users" with the raw body "{\"name\":\"raw\"}"
     Then the response status is 201
+
+  Scenario: XML values stay text, with their leading zeros, plus sign and attributes
+    When I send a GET request to "/xml-ids"
+    Then the response field "order.ref" equals "00123"
+    And the response field "order.phone" equals "+4412"
+    And the response field "order.qty" equals "7"
+    And the response field "order.@_id" equals "007"

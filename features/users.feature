@@ -9,6 +9,7 @@ Feature: Users API
     Then the response status is 200
     And the response field "data" has 3 items
     And the response field "data[0].name" equals "Ada Lovelace"
+    And the response field "data[2].email" equals "katherine@example.com"
     And the response header "content-type" contains "json"
 
   Scenario: Create a user

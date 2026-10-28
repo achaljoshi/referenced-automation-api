@@ -587,7 +587,32 @@ Same as `referenced-automation-utils`: VS Code prompts for the recommended exten
 
 `tests/support/testServer.ts` spins up a tiny in-process Express server exposing every feature above (all methods, auth-protected routes, paginated endpoints, an XML echo endpoint, a multipart upload endpoint). It's intentionally not a live third-party API - fast, deterministic, and works offline/in CI without flaking on network conditions outside this repo's control.
 
-`tests/mock/` is the working test suite for the three mocking tools themselves: `mockServer.spec.ts` (static/dynamic bodies, custom status/headers, `reset()`, `delayMs`), `routeMock.spec.ts` (`mockApiRoute` against a `*.invalid` host, so a pass genuinely proves interception rather than a lucky real response), and `recorder.spec.ts` (records against the real `testServer`, stops it, then proves playback still works with no backend at all).
+**Where the behaviours are tested.** What a person would recognise as the API doing something is a Gherkin scenario in `features/` (`npm run test:bdd` runs only those), against the in-process server above:
+
+| Behaviour | Feature |
+| --- | --- |
+| Users, request bodies, query/header data, uploads, raw bodies, XML as text | `users`, `request-bodies`, `http-methods` |
+| Each authentication scheme; many requests sharing one login, expired sessions, failed logins | `authentication`, `authentication-schemes`, `authentication-resilience` |
+| Retries, background jobs, retry notes in the report | `retry-policy`, `resilience` |
+| Paging by page number and by cursor, and failing loudly | `paging-through-results`, `paging-fails-loudly` |
+| GraphQL, SOAP, redirects, a gateway base URL | `graphql-and-files`, `protocols-and-redirects`, `base-url` |
+| The mock service (static answers, status, headers, delay, 404, reset) | `mock-service` |
+| Generated test data and environment values | `scenario-data` |
+
+The steps that only this repo needs (counters of the test server, a gateway, other hosts, "I try to ..." for requests that must fail, paging, the mock service, extra authentication schemes) are in `features/steps/*.ts`; the shared vocabulary is in `src/bdd`. Tags are unchanged: `--grep @smoke` and `--grep @regression` select the same behaviours as before (a feature carries the tag its old tests had).
+
+**What stays a plain spec, and why.** These test the framework itself, not an API behaviour a person would describe:
+
+| Spec | Why it is not a feature |
+| --- | --- |
+| `tests/envDocs.spec.ts`, `tests/windowsDocs.spec.ts` | documentation / environment / Windows drift guards |
+| `tests/curlConverter.spec.ts`, `tests/generated/examples.spec.ts` | the converter and its drift check (the committed example must equal what the converter writes) |
+| `tests/utilsContract.spec.ts` | "does what this package imports from utils still exist" |
+| `tests/apiFixtures.spec.ts`, `tests/remoteFixtures.spec.ts`, `tests/remote/` | fixtures, project options and the remote-host plumbing, some in a separate Playwright process |
+| `tests/assertions.spec.ts` | units of the response helpers and an oracle of the step vocabulary itself (a step must FAIL when it should) |
+| `tests/apiClient.spec.ts`, `tests/apiAdvanced.spec.ts`, `tests/baseUrl.spec.ts`, `tests/auth.spec.ts` | the library's own API: header get/remove, `{path}` parameters, object-to-XML, retry callbacks, poll errors and limits, response matchers, the exchange log and its masking, `joinUrl`, the refusal of a full URL, auth providers used without a client, a proxy, a timeout |
+| `tests/mock/mockServer.spec.ts` | handler functions and the server's own lifecycle (localhost only, throwing handlers, `stop()`, a taken port) |
+| `tests/mock/routeMock.spec.ts`, `tests/mock/recorder.spec.ts` | `mockApiRoute` / `recordApiTraffic` take a Playwright `page`, callbacks and files; a step vocabulary would only restate their signatures (these two need Chromium once) |
 
 `tests/envDocs.spec.ts` keeps [`.env.example`](.env.example), the [Configuration reference](#configuration-reference) table and [`.env.local.example`](.env.local.example) in step with the code (every variable the code or the shared utils config reads is documented, nothing else is), and `tests/windowsDocs.spec.ts` checks that every `bin` of this package has an npm script, that no document shows `npx <this package's own command>` without saying it is for a dependent project, that the Windows first-run section exists, and runs `npm run curl-to-tests -- --help` for real.
 

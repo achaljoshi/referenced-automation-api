@@ -14,4 +14,6 @@ npm run lint; npm run typecheck; npm test; npm run security     # Windows PowerS
 
 `npm test` builds first (`pretest`) and runs the drift guards: `tests/envDocs.spec.ts` (a variable the code reads must be documented in `.env.example` and the README "Configuration reference" table, a secret in `.env.local.example`; a documented variable must still be read) and `tests/windowsDocs.spec.ts` (every `bin` has an npm script; docs say `npm run curl-to-tests -- ...` inside this repo and `npx api-curl-to-playwright` only for a project that depends on this package). Add or rename an environment variable: update those three files in the same change.
 
+A test of what the API does for a person (a request, a login, paging, a retry, a mock answer) is a scenario in `features/` using the existing steps (`src/bdd`, `features/steps`); a test of the framework itself (drift guards, units of a class or function, oracles of the steps) is a plain `*.spec.ts` in `tests/` - the README "Testing this package itself" says which is which.
+
 Update `CHANGELOG.md`. This repo is in the chain `utils` -> `api`/`ui` -> `sap` -> `ui-api`: repackage after a change and re-test `ui-api`.
